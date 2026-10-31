@@ -9,6 +9,10 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+import support
+
+support.use_resolved_temp_root()
+
 import analyze_papers
 import codex_cli
 from codex_transcripts import record_transcript, TRANSCRIPT_ENV

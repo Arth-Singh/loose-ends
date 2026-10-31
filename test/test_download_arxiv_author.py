@@ -8,6 +8,10 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+import support
+
+support.use_resolved_temp_root()
+
 import download_arxiv
 import download_arxiv_author
 from download_arxiv_author import (

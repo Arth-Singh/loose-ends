@@ -15,6 +15,10 @@ import zipfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+import support
+
+support.use_resolved_temp_root()
+
 import open_problem_common as common
 import human_review
 from watchdog.observers import Observer
@@ -2525,6 +2529,8 @@ class WorkbenchStoreTests(unittest.TestCase):
                     peer.wait(timeout=5)
                 controller.close()
 
+    # The expectations below assume 4 KiB pages; Apple Silicon uses 16 KiB.
+    @patch.object(workbench_memory.mmap, "PAGESIZE", 4096)
     def test_linux_cgroup_backend_reconciles_limits_and_membership(self):
         with TemporaryDirectory() as temporary:
             root = Path(temporary)

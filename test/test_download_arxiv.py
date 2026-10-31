@@ -13,6 +13,10 @@ import zipfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+import support
+
+support.use_resolved_temp_root()
+
 import download_arxiv
 from download_arxiv import (
     RequestPacer,

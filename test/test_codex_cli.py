@@ -13,6 +13,10 @@ from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+import support
+
+support.use_resolved_temp_root()
+
 import codex_cli
 
 
