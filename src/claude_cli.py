@@ -49,19 +49,6 @@ LAUNCH_GATE_ENV = "LOOSE_ENDS_AGENT_LAUNCH_GATE"
 CONFIG_DIR_ENV = "CLAUDE_CONFIG_DIR"
 WORKSPACE_TOOLS = ("Read", "Write", "Edit", "Glob", "Grep", "Bash")
 WEB_TOOLS = ("WebSearch", "WebFetch")
-# Bash runs inside the OS sandbox: writes only in the workspace, no network.
-# The file tools are confined separately: acceptEdits approves edits only
-# inside the working directory, and the read block covers Read/Glob/Grep.
-SANDBOX_SETTINGS = {
-    "sandbox": {
-        "enabled": True,
-        "failIfUnavailable": True,
-        "autoAllowBashIfSandboxed": True,
-        "allowUnsandboxedCommands": False,
-        "network": {"allowedDomains": []},
-    },
-    "permissions": {"blockReadsOutsideWorkingDirectories": True},
-}
 # A parent Claude Code session exports these; some override the flags below.
 # Runs must behave the same whether the workbench starts from a terminal or
 # from inside a session.  ANTHROPIC_API_KEY would silently replace the
@@ -457,12 +444,101 @@ def read_agent_version(claude: str) -> str:
     return completed.stdout.strip()
 
 
+def tex_bin_directory(search_path: str | None = None) -> Path | None:
+    """Return the real TeX bin directory behind the kpsewhich on PATH.
+
+    kpsewhich is a compiled binary inside bin/<platform>, unlike latexmk,
+    which TeX Live links onward into texmf-dist/scripts.
+    """
+    kpsewhich = shutil.which("kpsewhich", path=search_path)
+    return Path(os.path.realpath(kpsewhich)).parent if kpsewhich else None
+
+
+def _tex_installation_root(bin_directory: Path) -> Path:
+    """Return a TeX Live tree from its bin/<platform> directory."""
+    if bin_directory.parent.name == "bin":
+        return bin_directory.parent.parent
+    return bin_directory
+
+
+def _symlinks_along(path: Path) -> list[Path]:
+    """Return each symbolic link met while resolving a path, as written."""
+    links: list[Path] = []
+    current = Path(path.anchor)
+    for part in path.parts[1:]:
+        current = current / part
+        if current.is_symlink():
+            links.append(current)
+            current = Path(os.path.realpath(current))
+    return links
+
+
+def sandbox_read_paths(search_path: str | None = None) -> list[str]:
+    """Return installation paths that sandboxed commands must read.
+
+    The sandbox denies reads under the home directory except the workspace,
+    so a validator Python or TeX installation there (uv, conda, pyenv,
+    TinyTeX) needs its tree granted.  The sandbox does not follow symbolic
+    links, so each link met on the way to a tree or to the interpreter is
+    granted too.  The home directory and its ancestors are never granted.
+    """
+    trees = [
+        Path(sys.prefix),
+        Path(sys.base_prefix),
+        Path(sys.exec_prefix),
+        Path(sys.base_exec_prefix),
+    ]
+    tex_bin = tex_bin_directory(search_path)
+    if tex_bin is not None:
+        trees.append(_tex_installation_root(tex_bin))
+    grants: set[Path] = set()
+    for tree in trees:
+        if tree.is_absolute():
+            grants.update((tree, Path(os.path.realpath(tree)), *_symlinks_along(tree)))
+    executable = Path(sys.executable)
+    if executable.is_absolute():
+        grants.update(_symlinks_along(executable))
+    home = Path.home().resolve()
+    protected = {home, *home.parents}
+    return sorted(
+        str(path)
+        for path in grants
+        if path not in protected and Path(os.path.realpath(path)) not in protected
+    )
+
+
+def sandbox_settings(search_path: str | None = None) -> dict:
+    """Return the Claude Code settings that confine one research run.
+
+    Bash runs inside the OS sandbox: writes only in the workspace, no
+    network, and reads outside it only from the toolchain directories.  The
+    file tools are confined separately: acceptEdits approves edits only
+    inside the working directory, and the read block covers Read/Glob/Grep.
+    """
+    return {
+        "sandbox": {
+            "enabled": True,
+            "failIfUnavailable": True,
+            "autoAllowBashIfSandboxed": True,
+            "allowUnsandboxedCommands": False,
+            "network": {"allowedDomains": []},
+            "filesystem": {"allowRead": sandbox_read_paths(search_path)},
+        },
+        "permissions": {"blockReadsOutsideWorkingDirectories": True},
+    }
+
+
 def agent_subprocess_environment(
     environment: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
-    """Copy the environment without variables that change Claude's behavior."""
+    """Copy the environment without variables that change Claude's behavior.
+
+    The real TeX bin directory goes first on PATH: a link directory such as
+    ~/.local/bin stays unreadable inside the sandbox, so latexmk must find
+    pdflatex and kpsewhich beside itself.
+    """
     source = os.environ if environment is None else environment
-    return {
+    copied = {
         key: value
         for key, value in source.items()
         if key in KEPT_ENVIRONMENT
@@ -471,6 +547,16 @@ def agent_subprocess_environment(
             and not key.startswith(STRIPPED_ENVIRONMENT_PREFIX)
         )
     }
+    search_path = copied.get("PATH")
+    tex_bin = tex_bin_directory(search_path)
+    if tex_bin is not None:
+        others = [
+            entry
+            for entry in (search_path or "").split(os.pathsep)
+            if entry and entry != str(tex_bin)
+        ]
+        copied["PATH"] = os.pathsep.join([str(tex_bin), *others])
+    return copied
 
 
 def agent_config_dir(environment: Mapping[str, str] | None = None) -> Path:
@@ -741,7 +827,7 @@ def build_agent_command(
         "--exclude-dynamic-system-prompt-sections",
         "--permission-mode=acceptEdits",
         "--permission-prompts=none",
-        "--settings=" + json.dumps(SANDBOX_SETTINGS, separators=(",", ":")),
+        "--settings=" + json.dumps(sandbox_settings(), separators=(",", ":")),
         "--tools=" + ",".join((*WORKSPACE_TOOLS, *web_tools)),
         "--allowedTools=" + ",".join(("Glob", "Grep", *web_tools)),
     ]

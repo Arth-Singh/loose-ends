@@ -476,7 +476,12 @@ Each invocation runs `claude -p` with:
   your own `CLAUDE.md`, hooks, skills, plugins, MCP servers, and memory never
   reach a research run, and runs leave no saved sessions;
 * the macOS Seatbelt (Linux: bubblewrap) sandbox for Bash, which may write only
-  inside the run's workspace and has no network access;
+  inside the run's workspace and has no network access. It cannot read your
+  home directory either, except the installation trees of the Python that runs
+  the pipeline and of the TeX Live found through `kpsewhich` on `PATH` (for
+  example a uv or conda Python and `~/Library/TinyTeX`). The real TeX
+  `bin/<platform>` directory goes first on the run's `PATH`, so a link
+  directory such as `~/.local/bin` stays closed;
 * `--permission-mode acceptEdits --permission-prompts none` and
   `blockReadsOutsideWorkingDirectories`, so the file tools can read and edit
   only the workspace, and any other request is denied instead of waiting;

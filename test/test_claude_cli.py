@@ -98,6 +98,7 @@ class CommandTests(unittest.TestCase):
         self.assertFalse(sandbox["allowUnsandboxedCommands"])
         self.assertEqual(sandbox["network"]["allowedDomains"], [])
         self.assertTrue(settings["permissions"]["blockReadsOutsideWorkingDirectories"])
+        self.assertIn(sys.prefix, sandbox["filesystem"]["allowRead"])
         self.assertEqual(
             option_value(command, "tools").split(","),
             ["Read", "Write", "Edit", "Glob", "Grep", "Bash"],
@@ -140,6 +141,75 @@ class CommandTests(unittest.TestCase):
         bare = self.command()
         for name in ("model", "effort", "max-budget-usd"):
             self.assertIsNone(option_value(bare, name))
+
+
+class ToolchainTests(unittest.TestCase):
+    @staticmethod
+    def fake_tex_live(root):
+        tex = root / "TinyTeX"
+        real_bin = tex / "bin" / "universal-darwin"
+        real_bin.mkdir(parents=True)
+        script = tex / "texmf-dist" / "scripts" / "latexmk" / "latexmk.pl"
+        script.parent.mkdir(parents=True)
+        script.write_text("#!/usr/bin/env perl\n", encoding="utf-8")
+        script.chmod(0o755)
+        (real_bin / "latexmk").symlink_to(script)
+        kpsewhich = real_bin / "kpsewhich"
+        kpsewhich.write_text("#!/bin/sh\n", encoding="utf-8")
+        kpsewhich.chmod(0o755)
+        links = root / "local-bin"
+        links.mkdir()
+        for name in ("latexmk", "kpsewhich"):
+            (links / name).symlink_to(real_bin / name)
+        return tex, real_bin, links
+
+    def test_tex_behind_a_link_directory_is_readable_and_first_on_path(self):
+        with TemporaryDirectory() as temporary:
+            tex, real_bin, links = self.fake_tex_live(Path(temporary))
+            search_path = os.pathsep.join([str(links), "/usr/bin"])
+
+            paths = claude_cli.sandbox_read_paths(search_path)
+            environment = claude_cli.agent_subprocess_environment({"PATH": search_path})
+
+        self.assertIn(str(tex), paths)
+        self.assertNotIn(str(links), paths)
+        self.assertEqual(
+            environment["PATH"].split(os.pathsep),
+            [str(real_bin), str(links), "/usr/bin"],
+        )
+
+    def test_links_on_the_interpreter_path_are_readable(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            release = root / "cpython-3.12.12"
+            (release / "bin").mkdir(parents=True)
+            (release / "bin" / "python3.12").write_text("", encoding="utf-8")
+            alias = root / "cpython-3.12"
+            alias.symlink_to(release)
+            with (
+                patch.object(claude_cli.sys, "executable", str(alias / "bin" / "python3.12")),
+                patch.object(claude_cli.sys, "prefix", str(release)),
+                patch.object(claude_cli.sys, "base_prefix", str(release)),
+                patch.object(claude_cli.shutil, "which", return_value=None),
+            ):
+                paths = claude_cli.sandbox_read_paths()
+
+        self.assertIn(str(alias), paths)
+        self.assertIn(str(release), paths)
+
+    def test_python_installation_is_readable_but_home_never_is(self):
+        home = Path.home().resolve()
+        interpreter = home / ".pyenv" / "versions" / "3.12.4"
+        with (
+            patch.object(claude_cli.sys, "prefix", str(home)),
+            patch.object(claude_cli.sys, "base_prefix", str(interpreter)),
+            patch.object(claude_cli.shutil, "which", return_value=None),
+        ):
+            paths = claude_cli.sandbox_read_paths()
+
+        self.assertIn(str(interpreter), paths)
+        self.assertNotIn(str(home), paths)
+        self.assertNotIn(str(home.parent), paths)
 
 
 class EnvironmentTests(unittest.TestCase):
