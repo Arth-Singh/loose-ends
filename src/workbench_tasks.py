@@ -89,8 +89,6 @@ class PlanError(claude_cli.AgentError):
 
 
 def command_display(argv: list[str]) -> str:
-    if os.name == "nt":
-        return subprocess.list2cmdline(argv)
     return shlex.join(argv)
 
 
@@ -140,7 +138,6 @@ def _dry_run_preview(unit: dict, options: dict) -> dict:
             errors="replace",
             timeout=DRY_RUN_TIMEOUT_SECONDS,
             check=False,
-            **claude_cli.popen_session_options(new_process_group=False),
         )
         preview["exitCode"] = completed.returncode
         if completed.returncode != 0:

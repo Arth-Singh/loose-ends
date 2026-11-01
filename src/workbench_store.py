@@ -31,17 +31,11 @@ MAX_MEMORY_LIMIT_GB = 100_000.0
 
 
 def _resource_identity(resource: str) -> tuple[str, str]:
-    """Return a comparable resource kind and path across slash conventions."""
+    """Return a comparable resource kind and path without trailing slashes."""
     kind, separator, value = resource.partition(":")
     if not separator:
         return "", resource
-    windows_path = "\\" in value or (
-        len(value) >= 2 and value[0].isalpha() and value[1] == ":"
-    )
-    path = value.replace("\\", "/").rstrip("/")
-    if windows_path:
-        path = path.casefold()
-    return kind, path
+    return kind, value.rstrip("/")
 
 
 def _resources_conflict(left: Iterable[str], right: Iterable[str]) -> bool:

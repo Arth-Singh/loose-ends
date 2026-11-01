@@ -182,11 +182,6 @@ def configure_utf8_stdio() -> None:
             reconfigure(encoding="utf-8", errors="backslashreplace")
 
 
-def popen_session_options(*, new_process_group: bool = True) -> dict[str, object]:
-    """Start children in their own session so a stop reaches all of them."""
-    return {"start_new_session": True} if new_process_group else {}
-
-
 def report_error(parser: argparse.ArgumentParser, error: BaseException) -> int:
     """Report a post-parse failure without printing irrelevant CLI usage."""
     print(f"{parser.prog}: error: {error}", file=sys.stderr)
@@ -656,7 +651,7 @@ def _run_agent_process(
         stderr=log,
         text=True,
         encoding="utf-8",
-        **popen_session_options(),
+        start_new_session=True,
     )
     if process.stdin is None:
         _stop_agent_process(process)

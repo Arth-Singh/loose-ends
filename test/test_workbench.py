@@ -2327,45 +2327,6 @@ class WorkbenchStoreTests(unittest.TestCase):
             16 * workbench_memory.GB_BYTES,
         )
 
-    def test_windows_memory_baseline_prefers_installed_capacity(self):
-        with (
-            patch.object(workbench_memory.os, "name", "nt"),
-            patch.object(
-                workbench_memory,
-                "_windows_installed_memory_bytes",
-                return_value=64 * workbench_memory.GB_BYTES,
-            ),
-            patch.object(
-                workbench_memory,
-                "_windows_usable_memory_bytes",
-                return_value=63.7 * workbench_memory.GB_BYTES,
-            ) as usable,
-        ):
-            self.assertEqual(
-                workbench_memory.physical_memory_bytes(),
-                64 * workbench_memory.GB_BYTES,
-            )
-            usable.assert_not_called()
-
-    def test_windows_memory_baseline_falls_back_to_usable_capacity(self):
-        with (
-            patch.object(workbench_memory.os, "name", "nt"),
-            patch.object(
-                workbench_memory,
-                "_windows_installed_memory_bytes",
-                return_value=None,
-            ),
-            patch.object(
-                workbench_memory,
-                "_windows_usable_memory_bytes",
-                return_value=63 * workbench_memory.GB_BYTES,
-            ),
-        ):
-            self.assertEqual(
-                workbench_memory.physical_memory_bytes(),
-                63 * workbench_memory.GB_BYTES,
-            )
-
     def test_pending_memory_reduction_pauses_only_scheduler_dispatch(self):
         with TemporaryDirectory() as temporary:
             state = Path(temporary)
@@ -2387,36 +2348,50 @@ class WorkbenchStoreTests(unittest.TestCase):
                 )
             )
 
-    def test_queue_memory_reduction_waits_for_current_usage(self):
+    @staticmethod
+    def _fake_worker_cgroup(directory: Path, *, current: int, limit: int) -> Path:
+        cgroup = directory / "worker-run-1"
+        cgroup.mkdir()
+        (cgroup / "cgroup.procs").write_text("", encoding="ascii")
+        (cgroup / "memory.current").write_text(f"{current}\n", encoding="ascii")
+        (cgroup / "memory.max").write_text(f"{limit}\n", encoding="ascii")
+        (cgroup / "memory.swap.current").write_text("0\n", encoding="ascii")
+        (cgroup / "memory.swap.max").write_text("0\n", encoding="ascii")
+        return cgroup
+
+    @staticmethod
+    def _cgroup_controller(cgroup: Path, physical_bytes: int):
         controller = object.__new__(workbench_memory.QueueMemoryController)
-        controller.physical_bytes = 64 * workbench_memory.GB_BYTES
+        controller.physical_bytes = physical_bytes
         controller.available = True
         controller.error = None
-        controller.backend = "windows_job"
-        container = object()
-        controller._containers = {"run-1": container}
+        controller.backend = workbench_memory.CGROUP_BACKEND
+        controller._containers = {"run-1": cgroup}
         controller._observed_peak = 0
-        controller._container_current_bytes = Mock(
-            return_value=12 * workbench_memory.GB_BYTES
-        )
-        controller._container_limit = Mock(
-            return_value=32 * workbench_memory.GB_BYTES
-        )
-        controller._set_container_limit = Mock()
+        return controller
 
-        snapshot = controller.reconcile(
-            {
-                "workerLimit": 4,
-                "memoryLimit": {"mode": "gb", "value": 32},
-            },
-            {"run-1"},
-        )
+    def test_queue_memory_reduction_waits_for_current_usage(self):
+        gb = workbench_memory.GB_BYTES
+        with TemporaryDirectory() as temporary:
+            cgroup = self._fake_worker_cgroup(
+                Path(temporary), current=12 * gb, limit=32 * gb
+            )
+            controller = self._cgroup_controller(cgroup, 64 * gb)
 
-        self.assertTrue(snapshot["pending"])
-        self.assertEqual(snapshot["allocationBytes"], 32 * workbench_memory.GB_BYTES)
-        self.assertEqual(snapshot["resolvedBytes"], 8 * workbench_memory.GB_BYTES)
-        self.assertEqual(snapshot["appliedBytes"], 32 * workbench_memory.GB_BYTES)
-        controller._set_container_limit.assert_not_called()
+            snapshot = controller.reconcile(
+                {
+                    "workerLimit": 4,
+                    "memoryLimit": {"mode": "gb", "value": 32},
+                },
+                {"run-1"},
+            )
+
+            self.assertTrue(snapshot["pending"])
+            self.assertEqual(snapshot["allocationBytes"], 32 * gb)
+            self.assertEqual(snapshot["resolvedBytes"], 8 * gb)
+            self.assertEqual(snapshot["appliedBytes"], 32 * gb)
+            self.assertEqual(snapshot["currentBytes"], 12 * gb)
+            self.assertEqual((cgroup / "memory.max").read_text().strip(), str(32 * gb))
 
     def test_queue_memory_reports_whether_worker_container_is_nonempty(self):
         controller = object.__new__(workbench_memory.QueueMemoryController)
@@ -2430,109 +2405,26 @@ class WorkbenchStoreTests(unittest.TestCase):
         self.assertFalse(controller.run_has_processes("run-1"))
 
     def test_queue_memory_increase_applies_immediately(self):
-        controller = object.__new__(workbench_memory.QueueMemoryController)
-        controller.physical_bytes = 64 * workbench_memory.GB_BYTES
-        controller.available = True
-        controller.error = None
-        controller.backend = "windows_job"
-        container = object()
-        controller._containers = {"run-1": container}
-        controller._observed_peak = 0
-        controller._container_current_bytes = Mock(
-            return_value=3 * workbench_memory.GB_BYTES
-        )
-        controller._container_limit = Mock(
-            return_value=4 * workbench_memory.GB_BYTES
-        )
-        controller._set_container_limit = Mock()
-
-        snapshot = controller.reconcile(
-            {
-                "workerLimit": 4,
-                "memoryLimit": {"mode": "percent", "value": 50},
-            },
-            {"run-1"},
-        )
-
-        self.assertFalse(snapshot["pending"])
-        self.assertEqual(snapshot["allocationBytes"], 32 * workbench_memory.GB_BYTES)
-        self.assertEqual(snapshot["appliedBytes"], 8 * workbench_memory.GB_BYTES)
-        controller._set_container_limit.assert_called_once_with(
-            container,
-            8 * workbench_memory.GB_BYTES,
-        )
-
-    @unittest.skipUnless(sys.platform == "win32", "Windows Job Objects")
-    def test_windows_worker_jobs_isolate_memory_limit_for_child_trees(self):
+        gb = workbench_memory.GB_BYTES
         with TemporaryDirectory() as temporary:
-            database = Path(temporary) / "workbench.sqlite3"
-            controller = workbench_memory.QueueMemoryController(database)
-            peer = None
-            try:
-                settings = {
-                    "workerLimit": 1,
-                    "memoryLimit": {"mode": "gb", "value": 0.1},
-                }
-                container = controller.prepare_run("rogue-run", settings)
-                peer_container = controller.prepare_run("peer-run", settings)
-                self.assertNotEqual(container, peer_container)
-                snapshot = controller.reconcile(
-                    settings,
-                    {"rogue-run", "peer-run"},
-                )
-                self.assertTrue(snapshot["available"])
-                base_environment = os.environ.copy()
-                base_environment["PYTHONPATH"] = os.pathsep.join(
-                    filter(
-                        None,
-                        [
-                            str(PROJECT_ROOT / "src"),
-                            base_environment.get("PYTHONPATH"),
-                        ],
-                    )
-                )
-                environment = base_environment.copy()
-                environment[workbench_memory.QUEUE_JOB_ENV] = container
-                peer_environment = base_environment.copy()
-                peer_environment[workbench_memory.QUEUE_JOB_ENV] = peer_container
-                join = (
-                    "from workbench_memory import "
-                    "join_queue_job_from_environment; "
-                    "join_queue_job_from_environment(); "
-                )
-                peer = subprocess.Popen(
-                    [
-                        sys.executable,
-                        "-c",
-                        join
-                        + "import time; data = bytearray(10 * 1024 * 1024); "
-                        "time.sleep(2); raise SystemExit(3)",
-                    ],
-                    env=peer_environment,
-                )
-                code = (
-                    join + "import sys; "
-                    "\ntry: data = bytearray(200 * 1024 * 1024)"
-                    "\nexcept MemoryError: sys.exit(42)"
-                    "\nsys.exit(3)"
-                )
-                result = subprocess.run(
-                    [sys.executable, "-c", code],
-                    env=environment,
-                    check=False,
-                )
-                self.assertEqual(result.returncode, 42)
-                controller.close()
-                controller = workbench_memory.QueueMemoryController(database)
-                reopened = controller.reconcile(settings, {"peer-run"})
-                self.assertGreater(reopened["currentBytes"], 0)
-                self.assertTrue(controller.run_has_processes("peer-run"))
-                self.assertEqual(peer.wait(), 3)
-                self.assertFalse(controller.run_has_processes("peer-run"))
-            finally:
-                if peer is not None and peer.poll() is None:
-                    peer.wait(timeout=5)
-                controller.close()
+            cgroup = self._fake_worker_cgroup(
+                Path(temporary), current=3 * gb, limit=4 * gb
+            )
+            controller = self._cgroup_controller(cgroup, 64 * gb)
+
+            snapshot = controller.reconcile(
+                {
+                    "workerLimit": 4,
+                    "memoryLimit": {"mode": "percent", "value": 50},
+                },
+                {"run-1"},
+            )
+
+            self.assertFalse(snapshot["pending"])
+            self.assertEqual(snapshot["allocationBytes"], 32 * gb)
+            self.assertEqual(snapshot["appliedBytes"], 8 * gb)
+            self.assertEqual((cgroup / "memory.max").read_text().strip(), str(8 * gb))
+            self.assertEqual((cgroup / "memory.swap.max").read_text().strip(), "0")
 
     # The expectations below assume 4 KiB pages; Apple Silicon uses 16 KiB.
     @patch.object(workbench_memory.mmap, "PAGESIZE", 4096)
@@ -2566,7 +2458,7 @@ class WorkbenchStoreTests(unittest.TestCase):
             controller.physical_bytes = 1_000
             controller.available = True
             controller.error = None
-            controller.backend = "linux_cgroup_v2"
+            controller.backend = workbench_memory.CGROUP_BACKEND
             controller._cgroup_parent = parent
             controller._cgroup = manager
             controller._containers = {"run-1": cgroup}
@@ -2631,10 +2523,9 @@ class WorkbenchStoreTests(unittest.TestCase):
 
     def test_unsupported_platform_runs_without_memory_enforcement(self):
         database = PROJECT_ROOT / "unused-memory-test.sqlite3"
-        for platform in ("darwin", "freebsd"):
+        for platform in ("darwin", "freebsd", "win32"):
             with (
                 patch.object(workbench_memory.sys, "platform", platform),
-                patch.object(workbench_memory.os, "name", "posix"),
                 patch.object(
                     workbench_memory,
                     "physical_memory_bytes",
@@ -2657,39 +2548,32 @@ class WorkbenchStoreTests(unittest.TestCase):
 
     def test_supported_platform_setup_failure_blocks_finite_memory_policies(self):
         database = PROJECT_ROOT / "unused-memory-test.sqlite3"
-        for platform, os_name in (("linux", "posix"), ("win32", "nt")):
-            with (
-                patch.object(workbench_memory.sys, "platform", platform),
-                patch.object(workbench_memory.os, "name", os_name),
-                patch.object(
-                    workbench_memory,
-                    "physical_memory_bytes",
-                    return_value=16 * workbench_memory.GB_BYTES,
-                ),
-                patch.object(
-                    workbench_memory.QueueMemoryController,
-                    "_initialize_linux",
-                    side_effect=OSError("test setup failure"),
-                ),
-                patch.object(
-                    workbench_memory,
-                    "_configure_kernel32",
-                    side_effect=OSError("test setup failure"),
-                ),
-            ):
-                controller = workbench_memory.QueueMemoryController(database)
-                for mode, value in (("percent", 50), ("gb", 8)):
-                    with self.subTest(platform=platform, mode=mode):
-                        settings = {"memoryLimit": {"mode": mode, "value": value}}
-                        snapshot = controller.reconcile(settings)
-                        self.assertTrue(snapshot["pending"])
-                        self.assertIn("test setup failure", snapshot["error"])
-                        self.assertIsNone(snapshot["warning"])
-                        with self.assertRaisesRegex(OSError, "test setup failure"):
-                            controller.prepare_run("test-run", settings)
-                unlimited = {"memoryLimit": {"mode": "unlimited", "value": None}}
-                self.assertFalse(controller.reconcile(unlimited)["pending"])
-                self.assertIsNone(controller.prepare_run("test-run", unlimited))
+        with (
+            patch.object(workbench_memory.sys, "platform", "linux"),
+            patch.object(
+                workbench_memory,
+                "physical_memory_bytes",
+                return_value=16 * workbench_memory.GB_BYTES,
+            ),
+            patch.object(
+                workbench_memory.QueueMemoryController,
+                "_initialize_linux",
+                side_effect=OSError("test setup failure"),
+            ),
+        ):
+            controller = workbench_memory.QueueMemoryController(database)
+            for mode, value in (("percent", 50), ("gb", 8)):
+                with self.subTest(mode=mode):
+                    settings = {"memoryLimit": {"mode": mode, "value": value}}
+                    snapshot = controller.reconcile(settings)
+                    self.assertTrue(snapshot["pending"])
+                    self.assertIn("test setup failure", snapshot["error"])
+                    self.assertIsNone(snapshot["warning"])
+                    with self.assertRaisesRegex(OSError, "test setup failure"):
+                        controller.prepare_run("test-run", settings)
+            unlimited = {"memoryLimit": {"mode": "unlimited", "value": None}}
+            self.assertFalse(controller.reconcile(unlimited)["pending"])
+            self.assertIsNone(controller.prepare_run("test-run", unlimited))
 
     def test_linux_without_delegation_pauses_a_finite_policy(self):
         controller = object.__new__(workbench_memory.QueueMemoryController)
@@ -3489,7 +3373,6 @@ class WorkbenchWatchTests(unittest.TestCase):
         database = PROJECT_ROOT / "unused-memory-test.sqlite3"
         with (
             patch.object(workbench_memory.sys, "platform", "darwin"),
-            patch.object(workbench_memory.os, "name", "posix"),
             patch.object(
                 workbench_memory,
                 "physical_memory_bytes",

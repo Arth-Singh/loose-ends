@@ -1350,8 +1350,8 @@ class Scheduler:
             "stdin": subprocess.DEVNULL,
             "stdout": subprocess.DEVNULL,
             "stderr": subprocess.DEVNULL,
+            "start_new_session": True,
         }
-        options.update(claude_cli.popen_session_options())
         try:
             subprocess.Popen(command, **options)
         except OSError as exc:

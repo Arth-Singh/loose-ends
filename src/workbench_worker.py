@@ -115,34 +115,19 @@ def recover_run_artifacts(store: WorkbenchStore, run: dict) -> None:
 def _stop_process_tree(process: subprocess.Popen) -> None:
     if process.poll() is not None:
         return
-    if os.name == "nt":
-        try:
-            process.send_signal(signal.CTRL_BREAK_EVENT)
-        except (OSError, ValueError):
-            process.terminate()
-    else:
-        try:
-            os.killpg(process.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            return
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
     deadline = time.monotonic() + CANCEL_GRACE_SECONDS
     while process.poll() is None and time.monotonic() < deadline:
         time.sleep(0.2)
     if process.poll() is not None:
         return
-    if os.name == "nt":
-        subprocess.run(
-            ["taskkill", "/PID", str(process.pid), "/T", "/F"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-            **claude_cli.popen_session_options(new_process_group=False),
-        )
-    else:
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
 
 
 def run_worker(database: Path, run_id: str) -> int:
@@ -183,7 +168,6 @@ def run_worker(database: Path, run_id: str) -> int:
     artifact_log = log_path.parent / "artifacts.txt"
     artifact_log.touch(exist_ok=True)
     environment[artifact_reporting.ARTIFACT_LOG_ENV] = str(artifact_log)
-    popen_options = claude_cli.popen_session_options()
 
     process: subprocess.Popen | None = None
     canceled = False
@@ -204,7 +188,7 @@ def run_worker(database: Path, run_id: str) -> int:
                 stdout=log,
                 stderr=subprocess.STDOUT,
                 text=True,
-                **popen_options,
+                start_new_session=True,
             )
             next_heartbeat = time.monotonic()
             while process.poll() is None:

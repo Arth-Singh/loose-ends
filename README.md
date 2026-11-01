@@ -1183,8 +1183,7 @@ resets; use **Resume queue** after that to restart pending work. Active runs
 continue. A task's **Retry all failed/partial** button creates a new task with
 its latest failed and partial runs, using the same commands and settings.
 Partial runs restart their commands and may repeat completed work.
-On Windows, each worker process tree gets a separate Job
-Object committed-memory limit. On Linux, each worker gets a separate cgroups v2
+On Linux, each worker gets a separate cgroups v2
 `memory.max` limit, with `memory.swap.max` set to zero so the worker cannot evade
 its ceiling by moving allocations into swap; infinity restores both controls to
 `max`. These are ceilings, not reservations. Lowering the computed per-worker
