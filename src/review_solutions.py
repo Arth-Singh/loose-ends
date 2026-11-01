@@ -800,18 +800,18 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""examples:
   Review pending attempts that contain checkable progress:
-    python src/review_solutions.py papers/edemaine --jobs 4
+    python3 src/review_solutions.py papers/edemaine --jobs 4
 
   Review every attempt for one problem with extra-high reasoning:
-    python src/review_solutions.py papers/edemaine/arXiv-... \\
+    python3 src/review_solutions.py papers/edemaine/arXiv-... \\
       --problem OP-001 --mode all \\
-      --model gpt-5.6-sol --reasoning-effort xhigh
+      --model claude-opus-5-5 --reasoning-effort xhigh
 
   Review attempts for exact problems selected by their directories:
-    python src/review_solutions.py paper/OP-00{1,4}
+    python3 src/review_solutions.py paper/OP-00{1,4}
 
   Review one exact stored attempt:
-    python src/review_solutions.py paper/OP-001/attempt-003
+    python3 src/review_solutions.py paper/OP-001/attempt-003
 """,
     )
     parser.add_argument(

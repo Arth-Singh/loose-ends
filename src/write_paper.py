@@ -2173,24 +2173,24 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""examples:
   Write and independently review one paper in one author-review round:
-    python src/write_paper.py \\
+    python3 src/write_paper.py \\
       papers/edemaine/arXiv-.../OP-001/attempt-003
 
   Use the latest attempt for every attempted problem in one paper:
-    python src/write_paper.py papers/edemaine/arXiv-...
+    python3 src/write_paper.py papers/edemaine/arXiv-...
 
   Combine two solved problems in one manuscript:
-    python src/write_paper.py \\
+    python3 src/write_paper.py \\
       papers/edemaine/arXiv-.../OP-001/attempt-003 \\
       papers/edemaine/arXiv-.../OP-004/attempt-002 \\
       --name combined-result --author "A. Author"
 
   Continue from an independently reviewed draft:
-    python src/write_paper.py --revise manuscripts/.../draft-001 \\
+    python3 src/write_paper.py --revise manuscripts/.../draft-001 \\
       --max-rounds 2
 
   Refresh a pinned or legacy draft from all latest paper results:
-    python src/write_paper.py --revise manuscripts/.../draft-001 \\
+    python3 src/write_paper.py --revise manuscripts/.../draft-001 \\
       --refresh-results
 """,
     )

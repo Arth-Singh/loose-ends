@@ -999,27 +999,27 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""examples:
   Solve two exact problems selected by their stored directories:
-    python src/solve_open_problems.py paper/OP-00{1,4}
+    python3 src/solve_open_problems.py paper/OP-00{1,4}
 
   Solve every current triage item classified attempt, then review progress:
-    python src/solve_open_problems.py papers/edemaine \\
+    python3 src/solve_open_problems.py papers/edemaine \\
       --from-triage attempt --jobs 4
 
   Explicitly try one problem, even without current triage:
-    python src/solve_open_problems.py papers/edemaine/arXiv-... \\
-      --problem OP-003 --model gpt-5.6-sol \\
-      --reasoning-effort xhigh --fast
+    python3 src/solve_open_problems.py papers/edemaine/arXiv-... \\
+      --problem OP-003 --model claude-opus-5-5 \\
+      --reasoning-effort max
 
   Include maybe items, but only report solver output without critics:
-    python src/solve_open_problems.py papers/edemaine \\
+    python3 src/solve_open_problems.py papers/edemaine \\
       --from-triage attempt,maybe --review none
 
   Try each unresolved problem up to three times, reviewing between rounds:
-    python src/solve_open_problems.py papers/edemaine \\
+    python3 src/solve_open_problems.py papers/edemaine \\
       --from-triage attempt --max-rounds 3
 
   Give every selected solver an additional research direction:
-    python src/solve_open_problems.py paper/OP-001 \\
+    python3 src/solve_open_problems.py paper/OP-001 \\
       --prompt "Try a computational search before committing to a proof"
 """,
     )
@@ -1525,7 +1525,7 @@ def main(argv: list[str] | None = None) -> int:
             "  "
             + shlex.join(
                 [
-                    "python",
+                    "python3",
                     "src/human_review.py",
                     *(str(path) for path in args.paths),
                 ]

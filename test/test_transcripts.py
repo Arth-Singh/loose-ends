@@ -96,7 +96,7 @@ class TranscriptTests(unittest.TestCase):
         with TemporaryDirectory() as temporary:
             root = Path(temporary)
             events = root / "events.jsonl"
-            first = json.dumps({"type": "item.completed", "item": {"text": "工具" * 50000}}, ensure_ascii=False).encode() + b"\n"
+            first = json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "工具" * 50000}]}}, ensure_ascii=False).encode() + b"\n"
             events.write_bytes(first + b'{"type":')
             run = {"log_path": str(root / "managed" / "console.log"),
                    "status": "running", "outputs": [str(root / "attempt.md")]}

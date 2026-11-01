@@ -594,11 +594,11 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""examples:
   Analyze one paper with the configured Claude defaults:
-    python src/analyze_papers.py papers/author/arXiv-1706.03762
+    python3 src/analyze_papers.py papers/author/arXiv-1706.03762
 
-  Use the current frontier model with extra-high reasoning and Fast mode:
-    python src/analyze_papers.py papers/author \\
-      --model gpt-5.6-sol --reasoning-effort xhigh --fast
+  Use Opus with extra-high effort and a per-invocation budget cap:
+    python3 src/analyze_papers.py papers/author \\
+      --model claude-opus-5-5 --reasoning-effort xhigh --max-budget-usd 5
 """,
     )
     parser.add_argument(

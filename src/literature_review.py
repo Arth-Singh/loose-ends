@@ -737,21 +737,21 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""examples:
   Search current triage items classified attempt or maybe:
-    python src/literature_review.py papers/edemaine --jobs 4
+    python3 src/literature_review.py papers/edemaine --jobs 4
 
   Search one problem even without current triage:
-    python src/literature_review.py papers/edemaine/arXiv-... \\
+    python3 src/literature_review.py papers/edemaine/arXiv-... \\
       --problem OP-002 --web-search live
 
   Search exact problems selected by their stored directories:
-    python src/literature_review.py paper/OP-00{1,4}
+    python3 src/literature_review.py paper/OP-00{1,4}
 
   Search every extracted problem under one paper:
-    python src/literature_review.py papers/edemaine/arXiv-... \\
+    python3 src/literature_review.py papers/edemaine/arXiv-... \\
       --all-problems
 
   Search only problems that already have solver attempts:
-    python src/literature_review.py papers/edemaine --attempted
+    python3 src/literature_review.py papers/edemaine --attempted
 """,
     )
     parser.add_argument(

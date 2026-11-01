@@ -2312,17 +2312,17 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""examples:
   Build and open a dashboard containing every priority:
-    python src/human_review.py papers/edemaine
+    python3 src/human_review.py papers/edemaine
 
   Show only the newest selected attempt for each problem:
-    python src/human_review.py papers/edemaine --latest-per-problem
+    python3 src/human_review.py papers/edemaine --latest-per-problem
 
   Write a compact dashboard without embedding long Markdown files:
-    python src/human_review.py papers/edemaine \\
+    python3 src/human_review.py papers/edemaine \\
       --summary-only --output human-review.html --no-open
 
   Use the original terminal report instead:
-    python src/human_review.py papers/edemaine --terminal
+    python3 src/human_review.py papers/edemaine --terminal
 """,
     )
     parser.add_argument(

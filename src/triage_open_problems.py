@@ -427,15 +427,15 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""examples:
   Triage every stale problem under an author directory:
-    python src/triage_open_problems.py papers/edemaine --jobs 4
+    python3 src/triage_open_problems.py papers/edemaine --jobs 4
 
-  Triage two problem IDs with the latest model at extra-high reasoning:
-    python src/triage_open_problems.py papers/edemaine/arXiv-... \\
+  Triage two problem IDs with Opus at extra-high effort:
+    python3 src/triage_open_problems.py papers/edemaine/arXiv-... \\
       --problem OP-001 --problem OP-004 \\
-      --model gpt-5.6-sol --reasoning-effort xhigh --fast
+      --model claude-opus-5-5 --reasoning-effort xhigh
 
   Triage two exact problems selected by their stored directories:
-    python src/triage_open_problems.py paper/OP-00{1,4}
+    python3 src/triage_open_problems.py paper/OP-00{1,4}
 """,
     )
     parser.add_argument(
