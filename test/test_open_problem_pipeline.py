@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import support
 
-support.use_resolved_temp_root()
+support.isolate()
 
 import claude_cli
 import analyze_papers
@@ -1938,10 +1938,7 @@ class OpenProblemPipelineTests(unittest.TestCase):
             config_digest = claude_cli.semantic_config_digest(
                 prompt,
                 schema_text,
-                claude_cli.ModelOptions(
-                    claude_cli.DEFAULT_MODEL,
-                    claude_cli.DEFAULT_REASONING_EFFORT,
-                ),
+                claude_cli.ModelOptions(*claude_cli.STAGE_MODEL_DEFAULTS["triage"]),
                 validation_source=Path(
                     triage_open_problems.triage_validation.__file__
                 ),

@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import support
 
-support.use_resolved_temp_root()
+support.isolate()
 
 import download_arxiv
 import download_arxiv_author

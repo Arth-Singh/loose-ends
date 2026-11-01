@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import support
 
-support.use_resolved_temp_root()
+support.isolate()
 from transcripts import record_transcript, transcript_stage, TRANSCRIPT_ENV
 from workbench import WorkbenchHandler
 

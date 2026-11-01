@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import support
 
-support.use_resolved_temp_root()
+support.isolate()
 
 import claude_cli
 import open_problem_common
