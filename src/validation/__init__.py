@@ -1,2 +1,2 @@
-"""Deterministic validation for Codex-generated workspace outputs."""
+"""Deterministic validation for Claude-generated workspace outputs."""
 

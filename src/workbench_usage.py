@@ -1,7 +1,7 @@
-"""Persistent, rebuildable token accounting for saved Codex invocations.
+"""Persistent, rebuildable token and cost accounting for saved Claude invocations.
 
-Logs are imported in the background, never on a summary request. Thread/turn
-IDs deduplicate archived, installed, and merged repair logs. The index retains
+Logs are imported in the background, never on a summary request. Claude
+session IDs deduplicate archived, installed, and merged repair logs. The index retains
 observed history even when a job or an installed log is removed or replaced.
 """
 
@@ -16,28 +16,18 @@ import re
 import threading
 import time
 
-from codex_transcripts import transcript_stage
+from transcripts import RUN_TRANSCRIPT_DIRECTORY, transcript_stage
 from write_paper import resolve_manifest_path
 
 
-PRICING_VERSION = "openai-2026-10-25"
-PRICING_URL = "https://developers.openai.com/api/docs/pricing"
-# USD per million tokens: uncached input, cache read, cache write (30m), output.
-# https://developers.openai.com/api/docs/models/gpt-6.1-sol
-# https://developers.openai.com/api/docs/pricing?tab=suite
-RATES = {
-    "gpt-6-astra": (10, 1, 12.5, 50),
-    "gpt-6.1-sol": (2, .1, 2.5, 10),
-    "gpt-6-sol": (2, .2, 2.5, 10),
-    "gpt-6-luna": (.1, .01, .125, .5),
-    "gpt-5.6-sol": (4, .4, 5, 20),
-    "gpt-5.3-codex": (1.75, .175, 1.75, 14),
-}
 TOKEN_FIELDS = (
     "input_tokens", "cached_input_tokens", "cache_write_input_tokens",
     "output_tokens", "reasoning_output_tokens",
 )
-EVENT_RE = re.compile(rb'^\s*\{\s*"type"\s*:\s*"(thread.started|turn.started|turn.completed|turn.failed|error)"')
+# Parse only session-start and result lines. Claude Code does not put "type"
+# first in result events, and other writers may add spaces after colons, so
+# search anywhere in the line, tolerating JSON whitespace.
+USAGE_EVENT_RE = re.compile(rb'"subtype"\s*:\s*"init"|"type"\s*:\s*"result"')
 ENTITY_RE = re.compile(r"^(OP-\d+|attempt-\d+|draft-\d+)$")
 
 
@@ -57,43 +47,39 @@ def elapsed_value(value):
     return value if type(value) in (int, float) and math.isfinite(value) and value >= 0 else None
 
 
-def token_usage(value):
-    """Reject malformed counters rather than producing a plausible zero cost."""
-    if not isinstance(value, dict):
+def _count(source, key):
+    value = source.get(key, 0) if isinstance(source, dict) else 0
+    return value if type(value) is int and value >= 0 else None
+
+
+def result_usage(event):
+    """Convert a Claude Code result event into stored counters and its cost.
+
+    ``input_tokens`` counts all input, including cache reads and writes, so
+    the cache counters are subsets of it. Thinking is part of output. The
+    cost is Claude Code's own API-equivalent estimate for the invocation.
+    """
+    usage = event.get("usage")
+    if not isinstance(usage, dict):
         return None
-    if not all(type(value.get(key)) is int and value[key] >= 0
-               for key in ("input_tokens", "cached_input_tokens", "output_tokens")):
+    uncached = _count(usage, "input_tokens")
+    reads = _count(usage, "cache_read_input_tokens")
+    writes = _count(usage, "cache_creation_input_tokens")
+    output = _count(usage, "output_tokens")
+    thinking = _count(usage.get("output_tokens_details"), "thinking_tokens")
+    if None in (uncached, reads, writes, output, thinking) or thinking > output:
         return None
-    result = {key: value[key] for key in TOKEN_FIELDS if key in value}
-    if any(type(n) is not int or n < 0 for n in result.values()):
-        return None
-    if result["cached_input_tokens"] + result.get("cache_write_input_tokens", 0) > result["input_tokens"]:
-        return None
-    if result.get("reasoning_output_tokens", 0) > result["output_tokens"]:
-        return None
+    result = {
+        "input_tokens": uncached + reads + writes,
+        "cached_input_tokens": reads,
+        "cache_write_input_tokens": writes,
+        "output_tokens": output,
+        "reasoning_output_tokens": thinking,
+    }
+    cost = event.get("total_cost_usd")
+    if type(cost) in (int, float) and math.isfinite(cost) and cost >= 0:
+        result["cost_usd"] = float(cost)
     return result
-
-
-def model_rates(model, tier):
-    """Return the same effective USD/MTok rates used for calculation and display."""
-    rates = RATES.get(model)
-    if rates is None or tier not in {"standard", "fast", "ultrafast"}:
-        return None
-    if tier == "ultrafast" and model not in {"gpt-6-astra", "gpt-6.1-sol"}:
-        return None
-    multiplier = {"standard": 1, "fast": 2, "ultrafast": 6}[tier]
-    return tuple(rate * multiplier for rate in rates)
-
-
-def estimated_cost(usage, model, tier):
-    rates = model_rates(model, tier)
-    if rates is None:
-        return None
-    cached = usage["cached_input_tokens"]
-    writes = usage.get("cache_write_input_tokens", 0)
-    uncached = usage["input_tokens"] - cached - writes
-    return (uncached * rates[0] + cached * rates[1]
-            + writes * rates[2] + usage["output_tokens"] * rates[3]) / 1_000_000
 
 
 class UsageIndex:
@@ -119,8 +105,8 @@ class UsageIndex:
                 );
                 CREATE TABLE IF NOT EXISTS usage_invocations (
                     id TEXT PRIMARY KEY, stage TEXT NOT NULL, model TEXT,
-                    tier TEXT, quality INTEGER NOT NULL,
-                    usage_json TEXT, completed INTEGER NOT NULL
+                    quality INTEGER NOT NULL, usage_json TEXT,
+                    completed INTEGER NOT NULL, elapsed_seconds REAL
                 );
                 CREATE TABLE IF NOT EXISTS usage_scopes (
                     invocation_id TEXT NOT NULL REFERENCES usage_invocations(id),
@@ -130,7 +116,7 @@ class UsageIndex:
                 CREATE INDEX IF NOT EXISTS usage_scope_lookup ON usage_scopes(kind, path);
                 CREATE TABLE IF NOT EXISTS usage_run_times (
                     id TEXT PRIMARY KEY, started_at REAL, finished_at REAL,
-                    status TEXT NOT NULL, model TEXT, tier TEXT, stage TEXT
+                    status TEXT NOT NULL, model TEXT, stage TEXT
                 );
                 CREATE TABLE IF NOT EXISTS usage_run_scopes (
                     run_id TEXT NOT NULL REFERENCES usage_run_times(id),
@@ -166,7 +152,7 @@ class UsageIndex:
                 self.updated_at = time.time()
             except Exception as exc:
                 self.error = str(exc)
-                logging.exception("Could not index Codex usage")
+                logging.exception("Could not index Claude usage")
             finally:
                 self.indexing = False
                 if self.hub:
@@ -208,15 +194,6 @@ class UsageIndex:
                     break
         return scopes
 
-    @staticmethod
-    def _tier(value):
-        if value.get("requested_service_tier"):
-            return value["requested_service_tier"]
-        if value.get("requested_ultrafast_mode") is True:
-            return "ultrafast"
-        fast = value.get("requested_fast_mode")
-        return ("fast" if fast else "standard") if type(fast) is bool else None
-
     def _installed_context(self, events):
         prefix = events.name.removesuffix("events.jsonl")
         if prefix == "repair-":
@@ -224,15 +201,15 @@ class UsageIndex:
         manifest = self._json(events.parent / f"{prefix}manifest.json")
         if prefix == "review-" and events.parent.name.startswith("draft-"):
             manifest = self._json(events.parent / "paper-review-manifest.json")
-        return {"stage": transcript_stage(events) or "Codex",
-                "model": manifest.get("requested_model"), "tier": self._tier(manifest),
+        return {"stage": transcript_stage(events) or "Claude",
+                "model": manifest.get("requested_model"),
                 "quality": 2, "scopes": sorted(self._scopes(events))}
 
     def _managed_context(self, sources, run):
         events = resolve_manifest_path(sources["events"])
         scopes = self._scopes(events)
         scopes.update({("run", run["id"]), ("job", run["job_id"])})
-        stage = sources.get("stage") or transcript_stage(events) or "Codex"
+        stage = sources.get("stage") or transcript_stage(events) or "Claude"
         argv = json.loads(run["argv_json"])
         review = stage.startswith(("Review", "Paper review")) and run["action"] in {"solve", "write", "revise"}
         prefix = "--review-" if review else "--"
@@ -246,15 +223,11 @@ class UsageIndex:
             return None
 
         model = sources.get("model") or option(prefix + "model") or option("--model")
-        tier = sources.get("service_tier")
-        if tier is None:
-            tier = "ultrafast" if prefix + "ultrafast" in argv else "fast" if prefix + "fast" in argv else None
-            tier = tier or ("ultrafast" if "--ultrafast" in argv else "fast" if "--fast" in argv else "standard")
         # A review command naming an attempt is precise even before installation.
         targets = json.loads(run["targets_json"])
         if len(targets) == 1 and targets[0].get("kind") in {"attempt", "draft"}:
             scopes.add((targets[0]["kind"], path_key(targets[0]["path"])))
-        return {"stage": stage, "model": model, "tier": tier,
+        return {"stage": stage, "model": model,
                 "quality": 3 if sources.get("model") else 1, "scopes": sorted(scopes),
                 "elapsed_seconds": elapsed_value(sources.get("elapsed_seconds"))}
 
@@ -281,7 +254,6 @@ class UsageIndex:
                 model = option("--model")
                 if option("--review-model") not in (None, model):
                     model = None
-                tier = "ultrafast" if "--ultrafast" in argv else "fast" if "--fast" in argv else "standard"
                 stage = {"analyze": "Analyze", "metadata": "Extract metadata",
                          "literature": "Literature review", "review": "Review"}.get(run["action"])
                 if run["action"] == "triage" and "--solve" not in argv:
@@ -305,14 +277,15 @@ class UsageIndex:
                     path = resolve_manifest_path(output)
                     scopes.update((kind, value) for kind, value in self._scopes(path / "events.jsonl")
                                   if kind in {"paper", "problem", "manuscript"})
-                db.execute("""INSERT INTO usage_run_times VALUES (?, ?, ?, ?, ?, ?, ?)
+                db.execute("""INSERT INTO usage_run_times
+                    (id, started_at, finished_at, status, model, stage) VALUES (?, ?, ?, ?, ?, ?)
                     ON CONFLICT(id) DO UPDATE SET started_at=excluded.started_at,
                         finished_at=excluded.finished_at, status=excluded.status,
-                        model=excluded.model, tier=excluded.tier, stage=excluded.stage
+                        model=excluded.model, stage=excluded.stage
                     WHERE started_at IS NOT excluded.started_at OR finished_at IS NOT excluded.finished_at
                         OR status IS NOT excluded.status OR model IS NOT excluded.model
-                        OR tier IS NOT excluded.tier OR stage IS NOT excluded.stage""",
-                    (run["id"], run["started_at"], run["finished_at"], run["status"], model, tier, stage))
+                        OR stage IS NOT excluded.stage""",
+                    (run["id"], run["started_at"], run["finished_at"], run["status"], model, stage))
                 db.executemany("INSERT OR IGNORE INTO usage_run_scopes VALUES (?, ?, ?)",
                                [(run["id"], kind, value) for kind, value in scopes])
         self._run_cache.update(pending)
@@ -330,7 +303,7 @@ class UsageIndex:
         for run in runs:
             if self.stopping.is_set():
                 return changed
-            root = resolve_manifest_path(run["log_path"]).parent / "codex"
+            root = resolve_manifest_path(run["log_path"]).parent / RUN_TRANSCRIPT_DIRECTORY
             for folder in root.glob("turn-*"):
                 sources = self._json(folder / "source.json")
                 if not isinstance(sources.get("events"), str):
@@ -366,17 +339,16 @@ class UsageIndex:
         return changed
 
     def _import_empty_invocation(self, folder, context):
-        """A failed launch can have precise timing without any Codex events."""
+        """A failed launch can have precise timing without any Claude events."""
         identity = "invocation:" + path_key(folder)
         with self.store.connect() as db:
             changed = db.execute("""INSERT INTO usage_invocations
-                (id, stage, model, tier, quality, usage_json, completed, elapsed_seconds)
-                VALUES (?, ?, ?, ?, ?, NULL, 0, ?)
+                (id, stage, model, quality, usage_json, completed, elapsed_seconds)
+                VALUES (?, ?, ?, ?, NULL, 0, ?)
                 ON CONFLICT(id) DO UPDATE SET elapsed_seconds=excluded.elapsed_seconds,
-                    model=excluded.model, tier=excluded.tier
-                WHERE elapsed_seconds IS NOT excluded.elapsed_seconds OR model IS NOT excluded.model
-                    OR tier IS NOT excluded.tier""",
-                (identity, context["stage"], context["model"], context["tier"],
+                    model=excluded.model
+                WHERE elapsed_seconds IS NOT excluded.elapsed_seconds OR model IS NOT excluded.model""",
+                (identity, context["stage"], context["model"],
                  context["quality"], context["elapsed_seconds"])).rowcount
             db.executemany("INSERT OR IGNORE INTO usage_scopes VALUES (?, ?, ?)",
                            [(identity, kind, value) for kind, value in context["scopes"]])
@@ -417,25 +389,27 @@ class UsageIndex:
                     if not line or not line.endswith(b"\n"):
                         break
                     offset = stream.tell()
-                    if not EVENT_RE.match(line[:160]):
+                    if not USAGE_EVENT_RE.search(line):
                         continue
                     try:
                         event = json.loads(line)
                     except ValueError:
                         continue
-                    kind = event["type"]
-                    if kind == "thread.started":
-                        state = {"thread": event.get("thread_id") or f"source:{key}", "turn": 0}
-                        records[f"{state['thread']}:1"] = (None, False)
+                    if not isinstance(event, dict):
                         continue
-                    if kind == "turn.started":
-                        state["turn"] = state.get("turn", 0) + 1
-                    identity = f"{state.get('thread', 'source:' + key)}:{max(1, state.get('turn', 1))}"
-                    usage = token_usage(event.get("usage")) if kind == "turn.completed" else None
-                    if identity not in records or usage is not None:
-                        records[identity] = (usage, kind == "turn.completed")
+                    session = event.get("session_id")
+                    identity = (f"session:{session}" if isinstance(session, str) and session
+                                else f"source:{key}")
+                    if event.get("type") == "system" and event.get("subtype") == "init":
+                        model = event.get("model") if isinstance(event.get("model"), str) else None
+                        state = {"session": identity, "model": model}
+                        records.setdefault(identity, (None, False, model))
+                    elif event.get("type") == "result":
+                        model = state.get("model") if state.get("session") == identity else None
+                        completed = event.get("subtype") == "success" and not event.get("is_error")
+                        records[identity] = (result_usage(event), completed, model)
                 if not records and not state and stat.st_size:
-                    records[f"source:{key}:1"] = (None, False)
+                    records[f"source:{key}"] = (None, False, None)
                 stream.seek(max(0, offset - 128))
                 tail_digest = hashlib.sha256(stream.read(min(128, offset))).hexdigest()
         except OSError:
@@ -443,22 +417,20 @@ class UsageIndex:
         if self.stopping.is_set():
             return 0  # Do not mark an interrupted import as fully consumed.
         with self.store.connect() as db:
-            for identity, (usage, completed) in records.items():
+            for identity, (usage, completed, model) in records.items():
                 db.execute("""INSERT INTO usage_invocations
-                    (id, stage, model, tier, quality, usage_json, completed)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    (id, stage, model, quality, usage_json, completed)
+                    VALUES (?, ?, ?, ?, ?, ?)
                     ON CONFLICT(id) DO UPDATE SET
                     stage = CASE WHEN (excluded.quality >= quality AND stage NOT LIKE '%Repair%')
                         OR excluded.stage LIKE '%Repair%'
                         THEN excluded.stage ELSE stage END,
                     model = CASE WHEN excluded.model IS NOT NULL AND
                         (model IS NULL OR excluded.quality >= quality) THEN excluded.model ELSE model END,
-                    tier = CASE WHEN excluded.tier IS NOT NULL AND
-                        (tier IS NULL OR excluded.quality >= quality) THEN excluded.tier ELSE tier END,
                     quality = MAX(quality, excluded.quality),
                     usage_json = COALESCE(excluded.usage_json, usage_json),
                     completed = MAX(completed, excluded.completed)
-                    """, (identity, context["stage"], context.get("model"), context.get("tier"),
+                    """, (identity, context["stage"], model or context.get("model"),
                           context["quality"], json.dumps(usage) if usage is not None else None, int(completed)))
                 db.executemany("INSERT OR IGNORE INTO usage_scopes VALUES (?, ?, ?)",
                                [(identity, kind, path) for kind, path in context["scopes"]])
@@ -485,7 +457,7 @@ class UsageIndex:
             matching_runs AS (SELECT run_id AS id FROM direct UNION
                 SELECT path AS id FROM usage_scopes WHERE kind='run' AND invocation_id IN matched)
             """
-        runs = db.execute(cte + """SELECT t.id, t.model, t.tier, t.stage,
+        runs = db.execute(cte + """SELECT t.id, t.model, t.stage,
             COALESCE(r.started_at, t.started_at) AS started_at,
             COALESCE(r.finished_at, t.finished_at) AS finished_at,
             CASE WHEN r.id IS NULL AND t.status IN ('starting','running','cancel_requested')
@@ -508,7 +480,7 @@ class UsageIndex:
         selected_ids = {row["id"] for row in rows}
         covered = set()
         covered_stages = defaultdict(set)
-        pricing_hints = set()
+        model_hints = set()
         now = time.time()
         for run in runs:
             invocations = grouped[run["id"]]
@@ -518,13 +490,11 @@ class UsageIndex:
                 continue  # A single attempt/draft cannot inherit its whole multi-round run.
             untimed = [item for item in invocations if item["elapsed_seconds"] is None]
             models = {item["model"] for item in untimed}
-            tiers = {item["tier"] for item in untimed}
             names = {item["stage"] for item in untimed}
             model = next(iter(models)) if len(models) == 1 else None if untimed else run["model"]
-            tier = next(iter(tiers)) if len(tiers) == 1 else None if untimed else run["tier"]
             stage = next(iter(names)) if len(names) == 1 else run["stage"] if not untimed else None
             if invocations and not untimed:
-                model, tier, stage = None, None, "Other run time"
+                model, stage = None, "Other run time"
             start = elapsed_value(run["started_at"])
             end = elapsed_value(run["finished_at"])
             running = end is None and run["status"] in {"starting", "running", "cancel_requested"}
@@ -539,7 +509,7 @@ class UsageIndex:
             if not remainder and invocations and not untimed:
                 continue
             if len(models) <= 1:
-                pricing_hints.add((model, tier))
+                model_hints.add(model)
             if (not models and model in excluded) or any(name in excluded for name in models):
                 continue  # A mixed-model remainder cannot be assigned to one selected model.
             name = stage or "Run time · stage unavailable"
@@ -556,7 +526,7 @@ class UsageIndex:
             if stage:
                 stages[name]["missingElapsed"] -= len(ids - covered_stages[name])
                 covered_stages[name].update(ids)
-        return pricing_hints
+        return model_hints
 
     def summary(self, targets, *, exclude_models=(), successful_runs_only=False):
         """All accounting on this path reads SQLite only."""
@@ -579,7 +549,7 @@ class UsageIndex:
                     SELECT invocation_id FROM usage_scopes JOIN selected USING (kind, path)
                 )""", parameters).fetchall() if selected else []
             run_times, run_members = self._run_timing_rows(db, selected, parameters)
-        pricing_rows = rows
+        all_rows = rows
         if successful_runs_only:
             rows = [row for row in rows if row["successful"]]
             run_times = [run for run in run_times if run["status"] == "succeeded"]
@@ -598,27 +568,25 @@ class UsageIndex:
             total["elapsedSeconds"] = 0.0
         if not rows and total["elapsedFallbackRuns"]:
             total["estimatedCost"] = None
-        pricing = []
         # Keep excluded models visible so the popup can include them again.
-        choices = {(row["model"], row["tier"]) for row in pricing_rows}
-        known_models = {model for model, _ in choices}
-        choices.update((model, tier) for model, tier in hints if model not in known_models)
-        for model, tier in sorted(choices,
-                                  key=lambda pair: (pair[0] or "", pair[1] or "")):
-            rates = model_rates(model, tier)
-            pricing.append({"model": model, "tier": tier,
-                            "rates": dict(zip(("input", "cachedInput", "cacheWrite", "output"), rates))
-                            if rates is not None else None})
+        by_model = defaultdict(list)
+        for row in all_rows:
+            by_model[row["model"]].append(row)
+        for model in hints:
+            by_model.setdefault(model, [])
+        breakdown = [
+            {"model": model, "invocations": len(values),
+             "estimatedCost": self._totals(values)["estimatedCost"]}
+            for model, values in sorted(by_model.items(), key=lambda item: item[0] or "")
+        ]
         return {**total, "stages": [value for _, value in sorted(stages.items())],
                 "indexing": self.indexing, "indexError": self.error, "updatedAt": self.updated_at,
-                "pricingVersion": PRICING_VERSION, "pricingUrl": PRICING_URL,
-                "pricingRates": pricing,
+                "modelBreakdown": breakdown,
                 "modelFilterApplied": bool(excluded),
                 "successfulRunsOnly": successful_runs_only,
-                "assumptions": "API-equivalent token estimate at current short-context rates; "
-                "30-minute cache writes; unreported cache writes use ordinary input rates. "
-                "Excludes tool fees and long-context premiums. "
-                "Subscription charges may differ. Reasoning is included in output."}
+                "assumptions": "Cost as reported by Claude Code for each invocation: an "
+                "API-equivalent list-price estimate that includes cache reads and writes, "
+                "thinking, and web search. Subscription usage is not billed per token."}
 
     @staticmethod
     def _totals(rows):
@@ -630,7 +598,7 @@ class UsageIndex:
         models = set()
         for row in rows:
             if row["model"]:
-                models.add(f"{row['model']} · {row['tier'] or 'unknown tier'}")
+                models.add(row["model"])
             usage = json.loads(row["usage_json"]) if row["usage_json"] else None
             if usage is None:
                 missing += 1
@@ -639,12 +607,11 @@ class UsageIndex:
                 if field in usage:
                     counters[field] += usage[field]
                     available[field] += 1
-            estimate = estimated_cost(usage, row["model"], row["tier"])
-            if estimate is None:
-                unpriced += 1
-            else:
-                cost += estimate
+            if "cost_usd" in usage:
+                cost += usage["cost_usd"]
                 priced += 1
+            else:
+                unpriced += 1
         return {"tokens": counters, "reported": available, "invocations": len(rows),
                 "missingUsage": missing, "unpriced": unpriced, "priced": priced,
                 "estimatedCost": cost if priced else None, "models": sorted(models),

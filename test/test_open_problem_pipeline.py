@@ -13,7 +13,7 @@ import support
 
 support.use_resolved_temp_root()
 
-import codex_cli
+import claude_cli
 import analyze_papers
 import human_review
 import open_problem_common as common
@@ -80,15 +80,37 @@ def make_analyzed_paper(root: Path) -> Path:
 
 
 def write_run_files(workspace: Path) -> None:
+    events = (
+        {
+            "type": "system",
+            "subtype": "init",
+            "session_id": "s1",
+            "model": "claude-opus-5-5",
+            "tools": ["Read", "Write", "Edit", "Glob", "Grep", "Bash"],
+        },
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "session_id": "s1",
+            "total_cost_usd": 0.01,
+            "usage": {
+                "input_tokens": 10,
+                "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 0,
+                "output_tokens": 5,
+            },
+        },
+    )
     (workspace / "events.jsonl").write_text(
-        '{"type":"turn.completed"}\n',
+        "".join(json.dumps(event) + "\n" for event in events),
         encoding="utf-8",
     )
     (workspace / "run.log").write_text("", encoding="utf-8")
 
 
 class OpenProblemPipelineTests(unittest.TestCase):
-    def test_attempt_install_restores_owner_access_on_problem_directory(self):
+    def test_attempt_install_records_requested_model_options(self):
         with TemporaryDirectory() as temporary:
             paper = make_analyzed_paper(Path(temporary))
             problem = common.discover_problem_refs(
@@ -114,25 +136,27 @@ class OpenProblemPipelineTests(unittest.TestCase):
                 "prior_claim_dispositions": [],
             }
 
-            with patch.object(
-                codex_cli,
-                "grant_workspace_owner_inheritance",
-            ) as grant_owner_access:
-                destination = solve_open_problems._install_attempt(
-                    work,
-                    workspace=workspace,
-                    result=result,
-                    artifacts=[],
-                    config_digest="config",
-                    codex_version="test",
-                    options=codex_cli.ModelOptions(),
-                    prior_history_digest="history",
-                    recovered_from=workspace,
-                )
+            destination = solve_open_problems._install_attempt(
+                work,
+                workspace=workspace,
+                result=result,
+                artifacts=[],
+                config_digest="config",
+                claude_version="test",
+                options=claude_cli.ModelOptions("test-model", "max", 2.5),
+                prior_history_digest="history",
+                recovered_from=workspace,
+            )
 
-            grant_owner_access.assert_called_once_with(problem.directory)
             self.assertEqual(destination, problem.directory / "attempt-001")
             self.assertTrue((destination / "solver-result.json").is_file())
+            manifest = common.read_json(destination / "manifest.json")
+            self.assertEqual(manifest["requested_model"], "test-model")
+            self.assertEqual(manifest["requested_reasoning_effort"], "max")
+            self.assertEqual(manifest["requested_max_budget_usd"], 2.5)
+            self.assertEqual(
+                manifest["recovered_from_workspace"], workspace.name
+            )
 
     def test_human_priority_is_derived_from_merit_axes(self):
         base = {
@@ -189,12 +213,12 @@ class OpenProblemPipelineTests(unittest.TestCase):
         ):
             outcomes, failures = review_solutions.review_many(
                 [attempt],
-                codex="codex",
-                codex_version="test",
+                claude="claude",
+                claude_version="test",
                 prompt_template="prompt",
                 schema_path=Path("schema"),
                 config_digest="config",
-                options=codex_cli.ModelOptions(),
+                options=claude_cli.ModelOptions(),
                 jobs=1,
                 on_finished=lambda item, result, error: finished.append(
                     (item, result, error)
@@ -230,13 +254,13 @@ class OpenProblemPipelineTests(unittest.TestCase):
             )
             workspace = problem.directory / ".review-run-finished"
             workspace.mkdir()
-            options = codex_cli.ModelOptions("test-model", "xhigh", False)
+            options = claude_cli.ModelOptions("test-model", "xhigh")
             review_solutions._write_work_record(
                 workspace,
                 attempt,
                 attempt_digest=common.solver_attempt_digest(directory),
                 config_digest="config",
-                codex_version="test",
+                claude_version="test",
                 options=options,
                 web_search="live",
             )
@@ -268,8 +292,8 @@ class OpenProblemPipelineTests(unittest.TestCase):
 
             outcome = review_solutions.recover_review(
                 attempt,
-                codex="codex",
-                codex_version="test",
+                claude="claude",
+                claude_version="test",
                 config_digest="config",
                 options=options,
                 web_search="live",
@@ -374,11 +398,6 @@ class OpenProblemPipelineTests(unittest.TestCase):
                 ["C-001"],
             )
 
-    def setUp(self):
-        patcher = patch.object(codex_cli, "grant_sandbox_read_access")
-        patcher.start()
-        self.addCleanup(patcher.stop)
-
     def test_triage_is_batched_and_attempt_history_invalidates_it(self):
         with TemporaryDirectory() as temporary:
             paper = make_analyzed_paper(Path(temporary))
@@ -391,8 +410,8 @@ class OpenProblemPipelineTests(unittest.TestCase):
                     encoding="utf-8"
                 )
             )
-            options = codex_cli.ModelOptions("test-model", "xhigh", True)
-            config_digest = codex_cli.semantic_config_digest(
+            options = claude_cli.ModelOptions("test-model", "xhigh", 5.0)
+            config_digest = claude_cli.semantic_config_digest(
                 prompt,
                 schema_text,
                 options,
@@ -445,14 +464,14 @@ class OpenProblemPipelineTests(unittest.TestCase):
                 return workspace / "agent-result.json"
 
             with patch.object(
-                codex_cli,
-                "run_structured_codex",
+                claude_cli,
+                "run_structured_agent",
                 side_effect=fake_triage,
             ) as run:
                 outcomes = triage_open_problems.triage_paper(
                     problems,
-                    codex="codex",
-                    codex_version="test",
+                    claude="claude",
+                    claude_version="test",
                     prompt_template=prompt,
                     schema_path=triage_open_problems.DEFAULT_SCHEMA_PATH,
                     config_digest=config_digest,
@@ -480,43 +499,6 @@ class OpenProblemPipelineTests(unittest.TestCase):
                 encoding="utf-8",
             )
             self.assertFalse(common.triage_is_current(problems[0]))
-
-    def test_repairs_inaccessible_generated_data_before_triage(self):
-        with TemporaryDirectory() as temporary:
-            paper = make_analyzed_paper(Path(temporary))
-            with (
-                patch.object(
-                    codex_cli,
-                    "is_windows_host",
-                    return_value=True,
-                ),
-                patch.object(
-                    codex_cli,
-                    "workspace_is_user_accessible",
-                    side_effect=lambda path: path != paper / "analysis",
-                ),
-                patch.object(
-                    codex_cli,
-                    "resolve_codex_executable",
-                    return_value="resolved-codex",
-                ) as resolve,
-                patch.object(
-                    codex_cli,
-                    "normalize_workspace_access",
-                ) as normalize,
-            ):
-                codex, repaired = common.repair_problem_data_access(
-                    [paper],
-                    codex_command="codex",
-                )
-
-            self.assertEqual(codex, "resolved-codex")
-            self.assertEqual(repaired, 1)
-            resolve.assert_called_once_with("codex")
-            normalize.assert_called_once_with(
-                paper / "analysis",
-                "resolved-codex",
-            )
 
     def test_synthesizes_missing_triage_markdown_from_valid_json(self):
         with TemporaryDirectory() as temporary:
@@ -628,8 +610,8 @@ class OpenProblemPipelineTests(unittest.TestCase):
                     encoding="utf-8"
                 )
             )
-            solver_options = codex_cli.ModelOptions()
-            solver_config = codex_cli.semantic_config_digest(
+            solver_options = claude_cli.ModelOptions()
+            solver_config = claude_cli.semantic_config_digest(
                 solver_prompt,
                 solver_schema,
                 solver_options,
@@ -703,14 +685,14 @@ class OpenProblemPipelineTests(unittest.TestCase):
                 return workspace / "agent-result.json"
 
             with patch.object(
-                codex_cli,
-                "run_structured_codex",
+                claude_cli,
+                "run_structured_agent",
                 side_effect=fake_solver,
             ):
                 solve_outcome = solve_open_problems.solve_work(
                     work[0],
-                    codex="codex",
-                    codex_version="test",
+                    claude="claude",
+                    claude_version="test",
                     prompt_template=solver_prompt,
                     schema_path=solve_open_problems.DEFAULT_SCHEMA_PATH,
                     config_digest=solver_config,
@@ -730,8 +712,8 @@ class OpenProblemPipelineTests(unittest.TestCase):
             review_schema = review_solutions.DEFAULT_SCHEMA_PATH.read_text(
                 encoding="utf-8"
             )
-            review_options = codex_cli.ModelOptions()
-            review_config = codex_cli.semantic_config_digest(
+            review_options = claude_cli.ModelOptions()
+            review_config = claude_cli.semantic_config_digest(
                 review_prompt,
                 review_schema,
                 review_options,
@@ -779,14 +761,14 @@ class OpenProblemPipelineTests(unittest.TestCase):
                 return workspace / "agent-result.json"
 
             with patch.object(
-                codex_cli,
-                "run_structured_codex",
+                claude_cli,
+                "run_structured_agent",
                 side_effect=fake_review,
             ):
                 review_outcome = review_solutions.review_attempt(
                     attempt,
-                    codex="codex",
-                    codex_version="test",
+                    claude="claude",
+                    claude_version="test",
                     prompt_template=review_prompt,
                     schema_path=review_solutions.DEFAULT_SCHEMA_PATH,
                     config_digest=review_config,
@@ -861,8 +843,8 @@ class OpenProblemPipelineTests(unittest.TestCase):
                     encoding="utf-8"
                 )
             )
-            options = codex_cli.ModelOptions("test-model", "xhigh")
-            config_digest = codex_cli.semantic_config_digest(
+            options = claude_cli.ModelOptions("test-model", "xhigh")
+            config_digest = claude_cli.semantic_config_digest(
                 prompt,
                 schema_text,
                 options,
@@ -990,15 +972,15 @@ class OpenProblemPipelineTests(unittest.TestCase):
                 return workspace / "agent-result.json"
 
             with patch.object(
-                codex_cli,
-                "run_structured_codex",
+                claude_cli,
+                "run_structured_agent",
                 side_effect=fake_literature,
             ) as run:
                 outcomes = (
                     literature_review.search_paper_literature(
                         problems,
-                        codex="codex",
-                        codex_version="test",
+                        claude="claude",
+                        claude_version="test",
                         prompt_template=prompt,
                         schema_path=(
                             literature_review.DEFAULT_SCHEMA_PATH
@@ -1074,8 +1056,8 @@ class OpenProblemPipelineTests(unittest.TestCase):
                     encoding="utf-8"
                 )
             )
-            options = codex_cli.ModelOptions("test-model", "xhigh")
-            config_digest = codex_cli.semantic_config_digest(
+            options = claude_cli.ModelOptions("test-model", "xhigh")
+            config_digest = claude_cli.semantic_config_digest(
                 prompt,
                 schema_text,
                 options,
@@ -1092,7 +1074,7 @@ class OpenProblemPipelineTests(unittest.TestCase):
                 [problem],
                 input_digests=input_digests,
                 config_digest=config_digest,
-                codex_version="test",
+                claude_version="test",
                 options=options,
                 web_search="live",
             )
@@ -1132,11 +1114,11 @@ class OpenProblemPipelineTests(unittest.TestCase):
             )
             write_run_files(workspace)
 
-            with patch.object(codex_cli, "run_structured_codex") as run:
+            with patch.object(claude_cli, "run_structured_agent") as run:
                 outcomes = literature_review.search_paper_literature(
                     [problem],
-                    codex="codex",
-                    codex_version="test",
+                    claude="claude",
+                    claude_version="test",
                     prompt_template=prompt,
                     schema_path=literature_review.DEFAULT_SCHEMA_PATH,
                     config_digest=config_digest,
@@ -1178,8 +1160,8 @@ class OpenProblemPipelineTests(unittest.TestCase):
                     encoding="utf-8"
                 )
             )
-            options = codex_cli.ModelOptions("test-model", "xhigh")
-            config_digest = codex_cli.semantic_config_digest(
+            options = claude_cli.ModelOptions("test-model", "xhigh")
+            config_digest = claude_cli.semantic_config_digest(
                 prompt,
                 schema_text,
                 options,
@@ -1196,7 +1178,7 @@ class OpenProblemPipelineTests(unittest.TestCase):
                 [problem],
                 input_digests=input_digests,
                 config_digest=config_digest,
-                codex_version="test",
+                claude_version="test",
                 options=options,
                 web_search="live",
             )
@@ -1208,8 +1190,8 @@ class OpenProblemPipelineTests(unittest.TestCase):
 
             recovered = literature_review.recover_paper_literature(
                 [problem],
-                codex="codex",
-                codex_version="test",
+                claude="claude",
+                claude_version="test",
                 input_digests=input_digests,
                 config_digest=config_digest,
                 options=options,
@@ -1227,11 +1209,6 @@ class OpenProblemPipelineTests(unittest.TestCase):
             workspace.mkdir()
 
             def entry(problem_id, confidence, role):
-                problem = next(
-                    problem
-                    for problem in problems
-                    if problem.id == problem_id
-                )
                 return {
                     "problem_id": problem_id,
                     "resolution_status": "resolved",
@@ -1302,8 +1279,8 @@ class OpenProblemPipelineTests(unittest.TestCase):
                 entry=repaired,
                 input_digest=common.literature_input_digest(problems[0]),
                 config_digest="test-config",
-                codex_version="test",
-                options=codex_cli.ModelOptions("test-model", "xhigh"),
+                claude_version="test",
+                options=claude_cli.ModelOptions("test-model", "xhigh"),
                 web_search="live",
             )
             installed = (
@@ -1328,7 +1305,7 @@ class OpenProblemPipelineTests(unittest.TestCase):
                 {"status": "partial", "literature": [], "warnings": []},
             )
             with self.assertRaisesRegex(
-                common.CodexError,
+                common.AgentError,
                 "partial run; no reports were installed",
             ):
                 literature_review.validate_literature_result(
@@ -1385,7 +1362,7 @@ class OpenProblemPipelineTests(unittest.TestCase):
             problems = common.discover_problem_refs([paper])
             levels = ("medium", "high")
             bodies = ("MEDIUM BODY", "HIGH BODY")
-            for problem, level, body in zip(problems, levels, bodies):
+            for problem, level, body in zip(problems, levels, bodies, strict=True):
                 directory = problem.directory / "attempt-001"
                 directory.mkdir(parents=True)
                 (directory / "attempt.md").write_text(
@@ -1460,7 +1437,7 @@ class OpenProblemPipelineTests(unittest.TestCase):
                     problems,
                     priority={"high", "medium"},
                 )
-                with self.assertRaises(common.CodexError):
+                with self.assertRaises(common.AgentError):
                     human_review.discover_human_reviews(
                         problems,
                         priority={"high", "medium"},
@@ -1724,14 +1701,14 @@ class OpenProblemPipelineTests(unittest.TestCase):
                 empty_dashboard,
             )
 
-    def test_human_review_converts_project_root_only_once(self):
-        human_review._native_project_root.cache_clear()
-        self.addCleanup(human_review._native_project_root.cache_clear)
+    def test_human_review_links_absolute_paths_without_resolving(self):
+        for cached in (
+            human_review._browser_file_uri,
+            human_review.project_display_path,
+        ):
+            cached.cache_clear()
+            self.addCleanup(cached.cache_clear)
         with patch.object(
-            codex_cli,
-            "path_for_codex",
-            return_value=r"C:\Project\loose-ends",
-        ) as convert, patch.object(
             Path,
             "resolve",
             side_effect=AssertionError("absolute links must not be resolved"),
@@ -1746,32 +1723,10 @@ class OpenProblemPipelineTests(unittest.TestCase):
                 human_review.PROJECT_ROOT / "papers" / "second.pdf"
             )
 
-        convert.assert_called_once_with(human_review.PROJECT_ROOT)
-        self.assertEqual(
-            first,
-            "file:///C:/Project/loose-ends/papers/first%20paper.pdf",
-        )
-        self.assertEqual(
-            second,
-            "file:///C:/Project/loose-ends/papers/second.pdf",
-        )
+        root_uri = human_review.PROJECT_ROOT.as_uri()
+        self.assertEqual(first, f"{root_uri}/papers/first%20paper.pdf")
+        self.assertEqual(second, f"{root_uri}/papers/second.pdf")
         self.assertEqual(display, "papers/second.pdf")
-
-    def test_cygwin_browser_opener_uses_graphical_system_browser(self):
-        url = "http://localhost:35007/"
-        with patch.object(
-            human_review.sys,
-            "platform",
-            "cygwin",
-        ), patch.object(human_review.subprocess, "Popen") as popen:
-            opened = human_review.open_in_browser(url)
-
-        self.assertTrue(opened)
-        popen.assert_called_once_with(
-            ["cygstart", url],
-            stdout=human_review.subprocess.DEVNULL,
-            stderr=human_review.subprocess.DEVNULL,
-        )
 
     def test_solver_recovers_core_artifact_mislisting_without_new_turn(self):
         with TemporaryDirectory() as temporary:
@@ -1818,30 +1773,24 @@ class OpenProblemPipelineTests(unittest.TestCase):
                 1,
                 None,
             )
-            options = codex_cli.ModelOptions()
+            options = claude_cli.ModelOptions()
             solve_open_problems._write_work_record(
                 workspace,
                 work,
                 config_digest="config",
-                codex_version="test",
+                claude_version="test",
                 options=options,
                 prior_history_digest=common.attempt_history_digest(problem),
             )
 
-            with (
-                patch.object(
-                    codex_cli,
-                    "run_structured_codex",
-                ) as run,
-                patch.object(
-                    codex_cli,
-                    "normalize_workspace_access",
-                ) as normalize,
-            ):
+            with patch.object(
+                claude_cli,
+                "run_structured_agent",
+            ) as run:
                 outcome = solve_open_problems.solve_work(
                     work,
-                    codex="codex",
-                    codex_version="test",
+                    claude="claude",
+                    claude_version="test",
                     prompt_template="prompt",
                     schema_path=Path("schema"),
                     config_digest="config",
@@ -1850,7 +1799,6 @@ class OpenProblemPipelineTests(unittest.TestCase):
                 )
 
             run.assert_not_called()
-            normalize.assert_called_once_with(workspace, "codex")
             self.assertIn("recovered", outcome.message)
             self.assertTrue(workspace.is_dir())
             result = common.read_json(
@@ -1882,9 +1830,6 @@ class OpenProblemPipelineTests(unittest.TestCase):
                 "Checked independently.\n",
                 encoding="utf-8",
             )
-            workspace_for_codex = codex_cli.path_for_codex(workspace).replace(
-                "\\", "/"
-            )
             common.write_json(
                 workspace / "agent-result.json",
                 {
@@ -1901,7 +1846,7 @@ class OpenProblemPipelineTests(unittest.TestCase):
                         }
                     ],
                     "artifacts": [
-                        f"[Proof write-up](/{workspace_for_codex}"
+                        f"[Proof write-up]({workspace.as_posix()}"
                         "/partial-result.md:1)",
                         f"[Certificate]({workspace.as_posix()}/certificate.txt:1)",
                     ],
@@ -1915,24 +1860,24 @@ class OpenProblemPipelineTests(unittest.TestCase):
                 1,
                 None,
             )
-            options = codex_cli.ModelOptions()
+            options = claude_cli.ModelOptions()
             solve_open_problems._write_work_record(
                 workspace,
                 work,
                 config_digest="config",
-                codex_version="test",
+                claude_version="test",
                 options=options,
                 prior_history_digest=common.attempt_history_digest(problem),
             )
 
             with patch.object(
-                codex_cli,
-                "run_structured_codex",
+                claude_cli,
+                "run_structured_agent",
             ) as run:
                 outcome = solve_open_problems.solve_work(
                     work,
-                    codex="codex",
-                    codex_version="test",
+                    claude="claude",
+                    claude_version="test",
                     prompt_template="prompt",
                     schema_path=Path("schema"),
                     config_digest="config",
@@ -1969,67 +1914,6 @@ class OpenProblemPipelineTests(unittest.TestCase):
                 )
             )
 
-    def test_solver_recovers_markdown_blocked_by_windows_sandbox(self):
-        with TemporaryDirectory() as temporary:
-            paper = make_analyzed_paper(Path(temporary))
-            problem = common.discover_problem_refs(
-                [paper],
-                problem_ids={"OP-001"},
-            )[0]
-            work = solve_open_problems.SolveWork(
-                problem,
-                solve_open_problems.generic_guidance(),
-                1,
-                None,
-            )
-            workspace = problem.directory / ".solve-run-blocked"
-            workspace.mkdir(parents=True)
-            common.write_json(
-                workspace / "agent-result.json",
-                {
-                    "claimed_result_type": "partial_result",
-                    "summary": "A lemma was proved.",
-                    "external_sources": [],
-                    "checkable_claims": [
-                        {
-                            "id": "C-001",
-                            "type": "lemma",
-                            "statement": "The lemma holds.",
-                            "support": "Here is its proof.",
-                            "remaining_gap": "The theorem remains.",
-                        }
-                    ],
-                    "prior_claim_dispositions": [],
-                    "artifacts": [],
-                    "warnings": [],
-                },
-            )
-            (workspace / "events.jsonl").write_text(
-                '{"type":"turn.completed"}\n',
-                encoding="utf-8",
-            )
-            (workspace / "run.log").write_text(
-                "windows sandbox: helper_unknown_error: "
-                "apply deny-read ACLs\n",
-                encoding="utf-8",
-            )
-
-            self.assertTrue(
-                solve_open_problems.recover_missing_attempt_markdown(
-                    work,
-                    workspace,
-                )
-            )
-            attempt = (workspace / "attempt.md").read_text(encoding="utf-8")
-            self.assertIn("Driver recovery notice", attempt)
-            self.assertIn("C-001", attempt)
-            result, artifacts = solve_open_problems.validate_solver_result(
-                workspace / "agent-result.json",
-                workspace,
-            )
-            self.assertEqual(result["claimed_result_type"], "partial_result")
-            self.assertEqual(artifacts, [])
-
     def test_response_schemas_avoid_unsupported_unique_items(self):
         schemas = Path(__file__).resolve().parents[1] / "schemas"
         for path in schemas.glob("*.json"):
@@ -2051,12 +1935,12 @@ class OpenProblemPipelineTests(unittest.TestCase):
                     encoding="utf-8"
                 )
             )
-            config_digest = codex_cli.semantic_config_digest(
+            config_digest = claude_cli.semantic_config_digest(
                 prompt,
                 schema_text,
-                codex_cli.ModelOptions(
-                    codex_cli.DEFAULT_MODEL,
-                    codex_cli.DEFAULT_REASONING_EFFORT,
+                claude_cli.ModelOptions(
+                    claude_cli.DEFAULT_MODEL,
+                    claude_cli.DEFAULT_REASONING_EFFORT,
                 ),
                 validation_source=Path(
                     triage_open_problems.triage_validation.__file__
@@ -2116,6 +2000,25 @@ class OpenProblemPipelineTests(unittest.TestCase):
             self.assertIn("--from-triage", arguments)
             self.assertEqual(arguments.count("--exact-problem"), 2)
             self.assertIn("Feeding 2 current triage item(s)", output.getvalue())
+            # Triage's cheaper default model must not leak into the solver.
+            self.assertNotIn("--model", arguments)
+            self.assertNotIn("--reasoning-effort", arguments)
+            solver = solve_open_problems.build_parser().parse_args(arguments)
+            self.assertEqual(
+                (solver.model, solver.reasoning_effort),
+                claude_cli.STAGE_MODEL_DEFAULTS["solve"],
+            )
+
+            # The budget is not part of triage currentness and is forwarded.
+            with (
+                patch.object(solve_open_problems, "main", return_value=0) as solve_main,
+                redirect_stdout(StringIO()),
+            ):
+                triage_open_problems.main(
+                    [str(paper), "--solve", "attempt", "--max-budget-usd", "1.5"]
+                )
+            arguments = solve_main.call_args.args[0]
+            self.assertEqual(arguments[arguments.index("--max-budget-usd") + 1], "1.5")
 
     def test_solver_combines_all_triage_suggestions_in_one_attempt(self):
         with TemporaryDirectory() as temporary:
@@ -2216,12 +2119,12 @@ class OpenProblemPipelineTests(unittest.TestCase):
             ):
                 outcomes, failures = solve_open_problems.solve_many(
                     work_items,
-                    codex="codex",
-                    codex_version="test",
+                    claude="claude",
+                    claude_version="test",
                     prompt_template="prompt",
                     schema_path=Path("schema"),
                     config_digest="config",
-                    options=codex_cli.ModelOptions(),
+                    options=claude_cli.ModelOptions(),
                     jobs=2,
                     on_finished=lambda work, outcome, error: finished.append(
                         (work, outcome, error)
@@ -2255,25 +2158,20 @@ class OpenProblemPipelineTests(unittest.TestCase):
             self.assertIn("OP-002/attempt-001", text)
             self.assertIn("Selected 2 problem(s)", text)
 
-    def test_solver_aborts_batch_when_secure_sandbox_preflight_fails(self):
+    def test_solver_aborts_batch_when_claude_preflight_fails(self):
         with TemporaryDirectory() as temporary:
             paper = make_analyzed_paper(Path(temporary))
             error = StringIO()
             with (
                 patch.object(
-                    codex_cli,
-                    "resolve_codex_executable",
-                    return_value="codex",
+                    claude_cli,
+                    "resolve_agent_executable",
+                    return_value="resolved-claude",
                 ),
                 patch.object(
-                    codex_cli,
-                    "read_codex_version",
-                    return_value="test",
-                ),
-                patch.object(
-                    codex_cli,
-                    "require_secure_windows_sandbox",
-                    side_effect=common.CodexError("sandbox unavailable"),
+                    claude_cli,
+                    "read_agent_version",
+                    side_effect=common.AgentError("claude unavailable"),
                 ) as preflight,
                 patch.object(solve_open_problems, "solve_many") as solve_many,
                 redirect_stderr(error),
@@ -2283,13 +2181,10 @@ class OpenProblemPipelineTests(unittest.TestCase):
                 )
 
             self.assertEqual(returncode, 1)
-            preflight.assert_called_once_with(
-                "codex",
-                solve_open_problems.PROJECT_ROOT,
-            )
+            preflight.assert_called_once_with("resolved-claude")
             solve_many.assert_not_called()
             self.assertEqual(
-                error.getvalue().count("sandbox unavailable"),
+                error.getvalue().count("claude unavailable"),
                 1,
             )
             self.assertFalse(any((paper / "OP-001").glob(".solve-run-*")))
@@ -2373,18 +2268,14 @@ class OpenProblemPipelineTests(unittest.TestCase):
                     side_effect=fake_review_many,
                 ),
                 patch.object(
-                    codex_cli,
-                    "resolve_codex_executable",
-                    return_value="codex",
+                    claude_cli,
+                    "resolve_agent_executable",
+                    return_value="claude",
                 ),
                 patch.object(
-                    codex_cli,
-                    "read_codex_version",
+                    claude_cli,
+                    "read_agent_version",
                     return_value="test",
-                ),
-                patch.object(
-                    codex_cli,
-                    "require_secure_windows_sandbox",
                 ) as preflight,
                 redirect_stdout(output),
             ):
@@ -2399,10 +2290,7 @@ class OpenProblemPipelineTests(unittest.TestCase):
                 )
 
             self.assertEqual(returncode, 0)
-            preflight.assert_called_once_with(
-                "codex",
-                solve_open_problems.PROJECT_ROOT,
-            )
+            preflight.assert_called_once_with("claude")
             self.assertEqual(
                 events,
                 ["solve-1", "review-1", "solve-2", "review-2"],
@@ -2482,26 +2370,20 @@ class OpenProblemPipelineTests(unittest.TestCase):
 
             self.assertFalse(common.triage_is_current(problem))
 
-    def test_all_cli_entry_points_share_frontier_model_defaults(self):
-        parsers = (
-            analyze_papers.build_parser(),
-            triage_open_problems.build_parser(),
-            solve_open_problems.build_parser(),
-            review_solutions.build_parser(),
-            literature_review.build_parser(),
+    def test_cli_entry_points_use_their_stage_model_defaults(self):
+        cases = (
+            (analyze_papers.build_parser(), ["paper"], "claude-sonnet-5-5", "high"),
+            (triage_open_problems.build_parser(), ["paper"], "claude-sonnet-5-5", "medium"),
+            (solve_open_problems.build_parser(), ["paper", "--from-triage", "attempt"], "claude-opus-5-5", "high"),
+            (review_solutions.build_parser(), ["paper"], "claude-opus-5-5", "high"),
+            (literature_review.build_parser(), ["paper", "--all-problems"], "claude-sonnet-5-5", "medium"),
         )
-        arguments = (
-            ["paper"],
-            ["paper"],
-            ["paper", "--from-triage", "attempt"],
-            ["paper"],
-            ["paper", "--all-problems"],
-        )
-        for parser, argv in zip(parsers, arguments):
-            with self.subTest(program=parser.prog):
+        for parser, argv, model, effort in cases:
+            with self.subTest(program=parser.prog, model=model):
                 parsed = parser.parse_args(argv)
-                self.assertEqual(parsed.model, "gpt-6-astra")
-                self.assertEqual(parsed.reasoning_effort, "xhigh")
+                self.assertEqual(parsed.model, model)
+                self.assertEqual(parsed.reasoning_effort, effort)
+                self.assertIsNone(parsed.max_budget_usd)
                 self.assertIsNone(parsed.prompt)
                 self.assertIsInstance(parsed.prompt_template, Path)
 
@@ -2551,24 +2433,61 @@ class OpenProblemPipelineTests(unittest.TestCase):
         self.assertEqual(literature.web_search, "live")
 
     def test_live_web_search_does_not_enable_shell_network_or_plugins(self):
+        def option(command, name):
+            values = [
+                argument.removeprefix(f"{name}=")
+                for argument in command
+                if argument.startswith(f"{name}=")
+            ]
+            self.assertEqual(len(values), 1, f"{name} in {command}")
+            return values[0]
+
         with TemporaryDirectory() as temporary:
             root = Path(temporary)
-            command = codex_cli.build_exec_command(
-                codex="codex",
-                workspace=root,
-                prompt="prompt",
-                schema_path=root / "schema.json",
-                result_path=root / "result.json",
-                options=codex_cli.ModelOptions(),
-                web_search="live",
+            schema_path = root / "schema.json"
+            schema_path.write_text('{"type":"object"}\n', encoding="utf-8")
+            live, disabled = (
+                claude_cli.build_agent_command(
+                    claude="claude",
+                    schema_path=schema_path,
+                    options=claude_cli.ModelOptions(),
+                    web_search=mode,
+                )
+                for mode in ("live", "disabled")
             )
 
-        self.assertIn('web_search="live"', command)
-        self.assertIn("sandbox_workspace_write.network_access=false", command)
-        self.assertIn("apps._default.enabled=false", command)
-        self.assertIn("agents.enabled=false", command)
-        self.assertNotIn("prompt", command)
-        self.assertEqual(command[-1], "-")
+        self.assertEqual(
+            option(live, "--tools").split(","),
+            ["Read", "Write", "Edit", "Glob", "Grep", "Bash",
+             "WebSearch", "WebFetch"],
+        )
+        self.assertEqual(
+            option(live, "--allowedTools").split(","),
+            ["Glob", "Grep", "WebSearch", "WebFetch"],
+        )
+        self.assertEqual(
+            option(disabled, "--tools").split(","),
+            ["Read", "Write", "Edit", "Glob", "Grep", "Bash"],
+        )
+        self.assertEqual(option(disabled, "--allowedTools"), "Glob,Grep")
+        sandbox = json.loads(option(live, "--settings"))["sandbox"]
+        self.assertTrue(sandbox["enabled"])
+        self.assertTrue(sandbox["failIfUnavailable"])
+        self.assertFalse(sandbox["allowUnsandboxedCommands"])
+        self.assertEqual(sandbox["network"]["allowedDomains"], [])
+        self.assertIn("--strict-mcp-config", live)
+        self.assertEqual(live[0], "claude")
+        self.assertTrue(
+            all(argument.startswith("--") for argument in live[1:]),
+            "the prompt must go on stdin, not as a positional argument",
+        )
+        with self.assertRaisesRegex(claude_cli.AgentError, "web search"):
+            claude_cli.build_agent_command(
+                claude="claude",
+                schema_path=Path("schema.json"),
+                options=claude_cli.ModelOptions(),
+                web_search="indexed",
+            )
 
 
 if __name__ == "__main__":

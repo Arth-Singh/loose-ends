@@ -14,7 +14,7 @@ import sys
 import tempfile
 from typing import Sequence
 
-import codex_cli
+import claude_cli
 import open_problem_common as common
 from validation import literature as literature_validation
 
@@ -83,7 +83,7 @@ def render_prompt(
             "\n".join(f"- {problem.id}" for problem in problems),
         ).replace(
             "{{CONTEXT_DIRECTORY}}",
-            codex_cli.path_for_codex(context_directory),
+            str(context_directory),
         )
     )
     return (
@@ -113,7 +113,7 @@ def write_literature_schema(
         entry_schema = literature_schema["items"]
         entry_properties = entry_schema["properties"]
     except (KeyError, TypeError) as exc:
-        raise common.CodexError(
+        raise common.AgentError(
             "literature schema cannot be specialized by problem registry"
         ) from exc
     problem_ids = [problem.id for problem in problems]
@@ -190,33 +190,33 @@ def _validate_string_list(value: object, description: str) -> list[str]:
     if not isinstance(value, list) or not all(
         isinstance(item, str) for item in value
     ):
-        raise common.CodexError(f"literature response has invalid {description}")
+        raise common.AgentError(f"literature response has invalid {description}")
     return value
 
 
 def _validate_source(source: object, problem_id: str) -> dict:
     if not isinstance(source, dict):
-        raise common.CodexError(
+        raise common.AgentError(
             f"a literature source for {problem_id} is not an object"
         )
     source_id = source.get("id")
     if not isinstance(source_id, str) or not source_id.strip():
-        raise common.CodexError(
+        raise common.AgentError(
             f"invalid literature source ID for {problem_id}: "
             f"{source_id!r}"
         )
     source_id = source_id.strip()
     source["id"] = source_id
     if source.get("role") not in SOURCE_ROLES:
-        raise common.CodexError(
+        raise common.AgentError(
             f"literature source {source_id} has invalid role"
         )
     if source.get("priority") not in SOURCE_PRIORITIES:
-        raise common.CodexError(
+        raise common.AgentError(
             f"literature source {source_id} has invalid priority"
         )
     if source.get("source_type") not in SOURCE_TYPES:
-        raise common.CodexError(
+        raise common.AgentError(
             f"literature source {source_id} has invalid source_type"
         )
     for field in (
@@ -228,15 +228,15 @@ def _validate_source(source: object, problem_id: str) -> dict:
         "limitations",
     ):
         if not isinstance(source.get(field), str):
-            raise common.CodexError(
+            raise common.AgentError(
                 f"literature source {source_id} has invalid {field}"
             )
     if not source["title"].strip():
-        raise common.CodexError(
+        raise common.AgentError(
             f"literature source {source_id} has no title"
         )
     if not source["url"].startswith(("https://", "http://")):
-        raise common.CodexError(
+        raise common.AgentError(
             f"literature source {source_id} has invalid URL"
         )
     _validate_string_list(source.get("authors"), f"authors for {source_id}")
@@ -251,9 +251,9 @@ def validate_literature_result(
     """Validate and repair pre-checker literature output for recovery."""
     result = common.read_json(result_path, description="literature response")
     if result.get("status") not in {"complete", "partial"}:
-        raise common.CodexError("literature response has invalid run status")
+        raise common.AgentError("literature response has invalid run status")
     if result["status"] == "partial":
-        raise common.CodexError(
+        raise common.AgentError(
             "literature agent reported a partial run; no reports were installed"
         )
     root_warnings = _validate_string_list(
@@ -261,22 +261,22 @@ def validate_literature_result(
     )
     entries = result.get("literature")
     if not isinstance(entries, list):
-        raise common.CodexError("literature response has no literature array")
+        raise common.AgentError("literature response has no literature array")
     requested = {problem.id for problem in problems}
     by_id: dict[str, dict] = {}
     synthesized: list[str] = []
     status_repairs: list[str] = []
     for entry in entries:
         if not isinstance(entry, dict):
-            raise common.CodexError("a literature entry is not an object")
+            raise common.AgentError("a literature entry is not an object")
         problem_id = entry.get("problem_id")
         if problem_id not in requested:
-            raise common.CodexError(
+            raise common.AgentError(
                 f"literature response contains unrequested problem "
                 f"{problem_id!r}"
             )
         if problem_id in by_id:
-            raise common.CodexError(
+            raise common.AgentError(
                 f"literature response duplicates problem {problem_id}"
             )
         # Older specialized runs echoed the title as a redundant guard. Strip
@@ -285,11 +285,11 @@ def validate_literature_result(
         resolution = entry.get("resolution_status")
         confidence = entry.get("confidence")
         if resolution not in RESOLUTION_STATUSES:
-            raise common.CodexError(
+            raise common.AgentError(
                 f"literature response has invalid status for {problem_id}"
             )
         if confidence not in CONFIDENCE_LEVELS:
-            raise common.CodexError(
+            raise common.AgentError(
                 f"literature response has invalid confidence for {problem_id}"
             )
         for field in (
@@ -299,22 +299,22 @@ def validate_literature_result(
             "solver_briefing",
         ):
             if not isinstance(entry.get(field), str):
-                raise common.CodexError(
+                raise common.AgentError(
                     f"literature response has invalid {field} for {problem_id}"
                 )
         if not entry["status_summary"].strip():
-            raise common.CodexError(
+            raise common.AgentError(
                 f"literature response has no status summary for {problem_id}"
             )
         if resolution == "partially_resolved" and not entry[
             "residual_problem"
         ].strip():
-            raise common.CodexError(
+            raise common.AgentError(
                 f"partial resolution has no residual problem for {problem_id}"
             )
         sources = entry.get("sources")
         if not isinstance(sources, list):
-            raise common.CodexError(
+            raise common.AgentError(
                 f"literature response has invalid sources for {problem_id}"
             )
         validated_sources = [
@@ -358,8 +358,8 @@ def validate_literature_result(
                     encoding="utf-8",
                 )
             except OSError as exc:
-                raise common.CodexError(
-                    f"Codex did not create literature report for {problem_id}, "
+                raise common.AgentError(
+                    f"Claude did not create literature report for {problem_id}, "
                     f"and the driver could not synthesize it: {exc}"
                 ) from exc
             synthesized.append(problem_id)
@@ -368,13 +368,13 @@ def validate_literature_result(
             description=f"literature report for {problem_id}",
         )
         if problem_id not in contents:
-            raise common.CodexError(
+            raise common.AgentError(
                 f"literature report does not mention {problem_id}"
             )
         by_id[problem_id] = entry
     missing = requested.difference(by_id)
     if missing:
-        raise common.CodexError(
+        raise common.AgentError(
             "literature response omitted: " + ", ".join(sorted(missing))
         )
     driver_warnings = []
@@ -402,8 +402,8 @@ def _install_literature(
     entry: dict,
     input_digest: str,
     config_digest: str,
-    codex_version: str,
-    options: codex_cli.ModelOptions,
+    claude_version: str,
+    options: claude_cli.ModelOptions,
     web_search: str,
     recovered_from: Path | None = None,
 ) -> None:
@@ -453,11 +453,10 @@ def _install_literature(
             "analysis_digest": common.analysis_digest(
                 problem.paper_directory
             ),
-            "codex_version": codex_version,
+            "claude_version": claude_version,
             "requested_model": options.model,
             "requested_reasoning_effort": options.reasoning_effort,
-            "requested_fast_mode": options.fast,
-            "requested_service_tier": options.service_tier,
+            "requested_max_budget_usd": options.max_budget_usd,
             "requested_web_search": web_search,
             "resolution_status": entry["resolution_status"],
             "confidence": entry["confidence"],
@@ -490,7 +489,7 @@ def _install_literature(
         ):
             os.replace(staging / name, problem.directory / name)
     except OSError as exc:
-        raise common.CodexError(
+        raise common.AgentError(
             f"could not install literature search for {problem.id}; staging "
             f"preserved at {staging}: {exc}"
         ) from exc
@@ -507,8 +506,8 @@ def _write_work_record(
     *,
     input_digests: dict[str, str],
     config_digest: str,
-    codex_version: str,
-    options: codex_cli.ModelOptions,
+    claude_version: str,
+    options: claude_cli.ModelOptions,
     web_search: str,
 ) -> None:
     common.write_json(
@@ -521,11 +520,10 @@ def _write_work_record(
             },
             "input_digests": input_digests,
             "config_digest": config_digest,
-            "codex_version": codex_version,
+            "claude_version": claude_version,
             "requested_model": options.model,
             "requested_reasoning_effort": options.reasoning_effort,
-            "requested_fast_mode": options.fast,
-            "requested_service_tier": options.service_tier,
+            "requested_max_budget_usd": options.max_budget_usd,
             "requested_web_search": web_search,
         },
     )
@@ -534,11 +532,11 @@ def _write_work_record(
 def recover_paper_literature(
     problems: Sequence[common.ProblemRef],
     *,
-    codex: str,
-    codex_version: str,
+    claude: str,
+    claude_version: str,
     input_digests: dict[str, str],
     config_digest: str,
-    options: codex_cli.ModelOptions,
+    options: claude_cli.ModelOptions,
     web_search: str,
 ) -> list[LiteratureOutcome] | None:
     """Install a matching completed workspace without another model turn."""
@@ -559,7 +557,6 @@ def recover_paper_literature(
             and record.get("config_digest") == config_digest
         ):
             continue
-        codex_cli.normalize_workspace_access(workspace, codex)
         required = [
             workspace / "agent-result.json",
             workspace / "events.jsonl",
@@ -573,7 +570,7 @@ def recover_paper_literature(
                 workspace,
                 problems,
             )
-        except common.CodexError:
+        except common.AgentError:
             continue
         outcomes = []
         for problem in problems:
@@ -585,7 +582,7 @@ def recover_paper_literature(
                 entry=entry,
                 input_digest=input_digests[problem.id],
                 config_digest=config_digest,
-                codex_version=record.get("codex_version", codex_version),
+                claude_version=record.get("claude_version", claude_version),
                 options=options,
                 web_search=record.get("requested_web_search", web_search),
                 recovered_from=workspace,
@@ -608,17 +605,17 @@ def recover_paper_literature(
 def search_paper_literature(
     problems: Sequence[common.ProblemRef],
     *,
-    codex: str,
-    codex_version: str,
+    claude: str,
+    claude_version: str,
     prompt_template: str,
     schema_path: Path,
     config_digest: str,
-    options: codex_cli.ModelOptions,
+    options: claude_cli.ModelOptions,
     web_search: str = "live",
     allow_recovery: bool = True,
-    launch_interval: float = codex_cli.CODEX_LAUNCH_INTERVAL_SECONDS,
+    launch_interval: float = claude_cli.AGENT_LAUNCH_INTERVAL_SECONDS,
 ) -> list[LiteratureOutcome]:
-    """Search selected problems from one paper in one Codex run."""
+    """Search selected problems from one paper in one Claude run."""
     if not problems:
         return []
     paper = problems[0].paper_directory
@@ -631,8 +628,8 @@ def search_paper_literature(
     if allow_recovery:
         recovered = recover_paper_literature(
             problems,
-            codex=codex,
-            codex_version=codex_version,
+            claude=claude,
+            claude_version=claude_version,
             input_digests=input_digests,
             config_digest=config_digest,
             options=options,
@@ -649,7 +646,7 @@ def search_paper_literature(
             problems,
             input_digests=input_digests,
             config_digest=config_digest,
-            codex_version=codex_version,
+            claude_version=claude_version,
             options=options,
             web_search=web_search,
         )
@@ -670,12 +667,12 @@ def search_paper_literature(
             problems,
         )
         expectations = {"problem_ids": [problem.id for problem in problems]}
-        report = codex_cli.run_validated_codex(
-            codex=codex,
+        report = claude_cli.run_validated_agent(
+            claude=claude,
             workspace=workspace,
             prompt=prompt,
             schema_path=attempt_schema_path,
-            validator=codex_cli.OutputValidator(
+            validator=claude_cli.OutputValidator(
                 Path(literature_validation.__file__).resolve(),
                 literature_validation.validate,
                 expectations,
@@ -684,7 +681,7 @@ def search_paper_literature(
             web_search=web_search,
             launch_interval=launch_interval,
         )
-        root_result = codex_cli.validated_result(report)
+        root_result = claude_cli.validated_result(report)
         entries = {entry["problem_id"]: entry for entry in root_result["literature"]}
         outcomes: list[LiteratureOutcome] = []
         for problem in problems:
@@ -696,7 +693,7 @@ def search_paper_literature(
                 entry=entry,
                 input_digest=input_digests[problem.id],
                 config_digest=config_digest,
-                codex_version=codex_version,
+                claude_version=claude_version,
                 options=options,
                 web_search=web_search,
             )
@@ -710,8 +707,8 @@ def search_paper_literature(
                     f"{len(entry['sources'])} source(s)",
                 )
             )
-    except (common.CodexError, OSError) as exc:
-        raise common.CodexError(
+    except (common.AgentError, OSError) as exc:
+        raise common.AgentError(
             common.preserved_workspace_message(exc, workspace)
         ) from exc
     warning = common.cleanup_workspace(
@@ -801,7 +798,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "-j",
         "--jobs",
-        type=codex_cli.positive_integer,
+        type=claude_cli.positive_integer,
         default=1,
         help="maximum concurrent per-paper literature agents (default: 1)",
     )
@@ -814,14 +811,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="report pending literature searches without starting Codex",
+        help="report pending literature searches without starting Claude",
     )
     parser.add_argument(
-        "--codex",
-        default="codex",
-        help="Codex CLI executable or command name (default: codex)",
+        "--claude",
+        default="claude",
+        help="Claude Code executable or command name (default: claude)",
     )
-    codex_cli.add_prompt_arguments(
+    claude_cli.add_prompt_arguments(
         parser,
         default_template=DEFAULT_PROMPT_PATH,
         task="literature-search agent",
@@ -832,13 +829,13 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_SCHEMA_PATH,
         help=f"literature response schema (default: {DEFAULT_SCHEMA_PATH})",
     )
-    codex_cli.add_model_arguments(parser)
-    codex_cli.add_web_search_argument(parser, default="live")
+    claude_cli.add_model_arguments(parser, **claude_cli.stage_model_defaults("literature"))
+    claude_cli.add_web_search_argument(parser, default="live")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
-    codex_cli.configure_utf8_stdio()
+    claude_cli.configure_utf8_stdio()
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
@@ -849,7 +846,7 @@ def main(argv: list[str] | None = None) -> int:
             or args.all_problems
             or args.attempted
         ):
-            raise common.CodexError(
+            raise common.AgentError(
                 "direct problem paths cannot be combined with "
                 "--from-triage, --problem, --all-problems, or --attempted"
             )
@@ -899,15 +896,15 @@ def main(argv: list[str] | None = None) -> int:
         prompt_path = args.prompt_template.expanduser().resolve()
         schema_path = args.schema.expanduser().resolve()
         prompt_template = prompt_path.read_text(encoding="utf-8")
-        prompt_template = codex_cli.with_user_prompt(
+        prompt_template = claude_cli.with_user_prompt(
             prompt_template,
             args.prompt,
             task="literature-search agent",
         )
         schema_text = schema_path.read_text(encoding="utf-8")
         json.loads(schema_text)
-        options = codex_cli.model_options_from_args(args)
-        config_digest = codex_cli.semantic_config_digest(
+        options = claude_cli.model_options_from_args(args)
+        config_digest = claude_cli.semantic_config_digest(
             prompt_template,
             schema_text,
             options,
@@ -915,12 +912,12 @@ def main(argv: list[str] | None = None) -> int:
             validation_source=Path(literature_validation.__file__).resolve(),
         )
     except (
-        common.CodexError,
+        common.AgentError,
         OSError,
         UnicodeError,
         json.JSONDecodeError,
     ) as exc:
-        return codex_cli.report_error(parser, exc)
+        return claude_cli.report_error(parser, exc)
 
     current: list[LiteratureOutcome] = []
     stale: list[common.ProblemRef] = []
@@ -945,7 +942,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.dry_run:
         if stale:
-            codex_cli.report_codex_home_warnings()
+            claude_cli.report_agent_config_warnings()
         for problem in stale:
             print(
                 f"Would search literature: {problem.paper_directory} "
@@ -959,13 +956,13 @@ def main(argv: list[str] | None = None) -> int:
 
     if stale:
         try:
-            codex = codex_cli.resolve_codex_executable(args.codex)
-            codex_version = codex_cli.read_codex_version(codex)
-        except common.CodexError as exc:
-            return codex_cli.report_error(parser, exc)
+            claude = claude_cli.resolve_agent_executable(args.claude)
+            claude_version = claude_cli.read_agent_version(claude)
+        except common.AgentError as exc:
+            return claude_cli.report_error(parser, exc)
     else:
-        codex = args.codex
-        codex_version = "not queried"
+        claude = args.claude
+        claude_version = "not queried"
 
     outcomes = list(current)
     failures: list[tuple[Path, str]] = []
@@ -974,7 +971,7 @@ def main(argv: list[str] | None = None) -> int:
         print(
             f"Searching literature for {len(stale)} stale problem(s) from "
             f"{len(grouped)} paper(s), with up to "
-            f"{min(args.jobs, len(grouped))} Codex agent(s) at once "
+            f"{min(args.jobs, len(grouped))} Claude agent(s) at once "
             f"({args.web_search} web search)."
         )
         with ThreadPoolExecutor(
@@ -984,8 +981,8 @@ def main(argv: list[str] | None = None) -> int:
                 executor.submit(
                     search_paper_literature,
                     paper_problems,
-                    codex=codex,
-                    codex_version=codex_version,
+                    claude=claude,
+                    claude_version=claude_version,
                     prompt_template=prompt_template,
                     schema_path=schema_path,
                     config_digest=config_digest,
@@ -999,7 +996,7 @@ def main(argv: list[str] | None = None) -> int:
                 paper = future_to_paper[future]
                 try:
                     paper_outcomes = future.result()
-                except (common.CodexError, OSError) as exc:
+                except (common.AgentError, OSError) as exc:
                     failures.append((paper, str(exc)))
                     print(f"Failed: {paper}: {exc}", file=sys.stderr)
                     continue

@@ -4,7 +4,7 @@ const { test } = require("node:test");
 const vm = require("node:vm");
 
 const source = readFileSync(`${__dirname}/../src/workbench_web/app.js`, "utf8");
-const functions = ["formatDuration", "requestUsage", "usageCostLabel", "usageElapsedLabel", "usageTable", "usagePricingTable", "setUsageModelIncluded", "usageRunFilter", "refreshUsageFilters", "refreshUsageElement", "openCostDialog"]
+const functions = ["formatDuration", "requestUsage", "usageCostLabel", "usageElapsedLabel", "usageTable", "usageModelTable", "setUsageModelIncluded", "usageRunFilter", "refreshUsageFilters", "refreshUsageElement", "openCostDialog"]
   .map(name => source.match(new RegExp(`^(?:async )?function ${name}\\([^]*?^}`, "m"))[0]).join("\n");
 
 test("usage queries share in-flight requests, reuse cached totals, and can be refreshed", async () => {
@@ -77,13 +77,13 @@ test("model checkbox changes update all popup scopes while preserving page total
   });
   vm.runInContext(functions, context);
   context.refreshUsageElement = element => calls.push(element);
-  context.setUsageModelIncluded(modelFilter, "gpt-6.1-sol", false);
-  assert.equal(modelFilter.excludedModels.has("gpt-6.1-sol"), true);
+  context.setUsageModelIncluded(modelFilter, "claude-opus-5-5", false);
+  assert.equal(modelFilter.excludedModels.has("claude-opus-5-5"), true);
   assert.deepEqual(calls, [problem, attempt]);
   assert.equal(problem.usageValue, null);
   assert.equal(attempt.usageValue, null);
   assert.equal(pageButton.usageValue.estimatedCost, 3);
-  context.setUsageModelIncluded(modelFilter, "gpt-6.1-sol", true);
+  context.setUsageModelIncluded(modelFilter, "claude-opus-5-5", true);
   assert.equal(modelFilter.excludedModels.size, 0);
 });
 
@@ -111,7 +111,7 @@ test("successful-run queries compose with model filters and keep page cache tota
 });
 
 test("successful-run checkbox synchronizes all scopes while preserving model selections and page totals", () => {
-  const filter = { excludedModels: new Set(["gpt-6-astra"]), successfulRunsOnly: false };
+  const filter = { excludedModels: new Set(["claude-sonnet-5-5"]), successfulRunsOnly: false };
   const problem = { usageModelFilter: filter, usageValue: {} };
   const attempt = { usageModelFilter: filter, usageValue: {} };
   const page = { usageValue: { estimatedCost: 3 } };
@@ -135,7 +135,7 @@ test("successful-run checkbox synchronizes all scopes while preserving model sel
   assert.equal(filter.successfulRunsOnly, true);
   assert.deepEqual(calls, [problem, attempt]);
   assert.equal(page.usageValue.estimatedCost, 3);
-  assert.ok(filter.excludedModels.has("gpt-6-astra"));
+  assert.ok(filter.excludedModels.has("claude-sonnet-5-5"));
   assert.equal(context.usageRunFilter(filter).children[0].checked, true);
   input.checked = false;
   input.handlers.change();
@@ -189,25 +189,29 @@ test("usage table shows an elapsed total and unassigned time without inventing t
   assert.equal(table.children[3].children[0].children[2].text, "≈1m 50s");
 });
 
-test("pricing table preserves fractional rates and distinguishes unknown prices", () => {
+test("model table shows reported costs to sub-cent precision and distinguishes missing costs", () => {
   const context = vm.createContext({
     node: (tag, className, text) => ({ tag, text, children: [], append(...children) { this.children.push(...children); } }),
   });
   vm.runInContext(functions, context);
-  const table = context.usagePricingTable([
-    { model: "gpt-6.1-sol", tier: "ultrafast", rates: { input: 12, cachedInput: .6, cacheWrite: 15, output: 60 } },
-    { model: "gpt-6-luna", tier: "standard", rates: { input: .1, cachedInput: .01, cacheWrite: .125, output: .5 } },
-    { model: "unknown", tier: "standard", rates: null },
+  const table = context.usageModelTable([
+    { model: "claude-opus-5-5", invocations: 1234, estimatedCost: 12.3456 },
+    { model: "claude-haiku-5-5", invocations: 2, estimatedCost: .0042 },
+    { model: "claude-sonnet-5-5", invocations: 1, estimatedCost: .5 },
+    { model: null, invocations: 3, estimatedCost: null },
   ]).children[0];
-  assert.match(table.children[0].text, /USD per 1M tokens/);
-  const rows = table.children[2].children;
+  assert.match(table.children[0].text, /cost reported by Claude Code/);
   const cells = row => Array.from(row.children, cell => cell.text);
-  assert.deepEqual(cells(rows[0]), ["gpt-6.1-sol", "ultrafast", "$12.00", "$0.60", "$15.00", "$60.00"]);
-  assert.deepEqual(cells(rows[1]), ["gpt-6-luna", "standard", "$0.10", "$0.01", "$0.125", "$0.50"]);
-  assert.deepEqual(cells(rows[2]), ["unknown", "standard", "—", "—", "—", "—"]);
+  assert.deepEqual(cells(table.children[1].children[0]), ["Model", "Invocations", "Est. API cost"]);
+  const rows = table.children[2].children;
+  assert.deepEqual(cells(rows[0]), ["claude-opus-5-5", "1,234", "$12.3456"]);
+  assert.deepEqual(cells(rows[1]), ["claude-haiku-5-5", "2", "$0.0042"]);
+  assert.deepEqual(cells(rows[2]), ["claude-sonnet-5-5", "1", "$0.50"]);
+  assert.deepEqual(cells(rows[3]), ["Unknown model", "3", "—"]);
+  assert.match(rows[3].children[2].title, /No reported cost/);
 });
 
-test("pricing checkboxes select a model across its tiers and include unknown models", () => {
+test("model checkboxes toggle one model each and include unknown models", () => {
   const context = vm.createContext({
     node: (tag, className, text) => ({
       tag, text, children: [], dataset: {}, handlers: {},
@@ -221,26 +225,30 @@ test("pricing checkboxes select a model across its tiers and include unknown mod
   });
   vm.runInContext(functions, context);
   const filter = { excludedModels: new Set() };
-  const pricing = [
-    { model: "gpt-6.1-sol", tier: "standard", rates: null },
-    { model: "gpt-6.1-sol", tier: "fast", rates: null },
-    { model: null, tier: null, rates: null },
+  const breakdown = [
+    { model: "claude-opus-5-5", invocations: 2, estimatedCost: .5 },
+    { model: "claude-sonnet-5-5", invocations: 1, estimatedCost: .25 },
+    { model: null, invocations: 1, estimatedCost: null },
   ];
   const inputs = element => element.tag === "input" ? [element] : element.children.flatMap(inputs);
-  let controls = inputs(context.usagePricingTable(pricing, filter));
+  let controls = inputs(context.usageModelTable(breakdown, filter));
   assert.equal(controls.length, 3);
   assert.ok(controls.every(input => input.checked));
-  assert.match(controls[0]["aria-label"], /Include gpt-6.1-sol/);
+  assert.match(controls[0]["aria-label"], /Include claude-opus-5-5/);
+  assert.match(controls[2]["aria-label"], /Include Unknown model/);
+  // Focus restoration after a refresh matches these keys, including null.
+  assert.deepEqual(controls.map(input => input.dataset.usageModel), ['"claude-opus-5-5"', '"claude-sonnet-5-5"', "null"]);
   controls[0].checked = false;
   controls[0].handlers.change();
-  controls = inputs(context.usagePricingTable(pricing, filter));
-  assert.deepEqual(controls.map(input => input.checked), [false, false, true]);
+  controls = inputs(context.usageModelTable(breakdown, filter));
+  assert.deepEqual(controls.map(input => input.checked), [false, true, true]);
   controls[2].checked = false;
   controls[2].handlers.change();
   assert.equal(filter.excludedModels.has(null), true);
-  controls[1].checked = true;
-  controls[1].handlers.change();
-  assert.equal(filter.excludedModels.has("gpt-6.1-sol"), false);
+  controls[0].checked = true;
+  controls[0].handlers.change();
+  assert.equal(filter.excludedModels.has("claude-opus-5-5"), false);
+  assert.deepEqual([...filter.excludedModels], [null]);
 });
 
 test("late usage responses do not overwrite an abandoned detail panel", async () => {
@@ -272,7 +280,7 @@ test("older filter responses cannot overwrite the latest model and successful-ru
   });
   vm.runInContext(functions.replace(/^async function requestUsage\([^]*?^}\n/m, ""), context);
   const first = context.refreshUsageElement(element);
-  element.usageModelFilter.excludedModels.add("gpt-6.1-sol");
+  element.usageModelFilter.excludedModels.add("claude-opus-5-5");
   const second = context.refreshUsageElement(element);
   element.usageModelFilter.successfulRunsOnly = true;
   const third = context.refreshUsageElement(element);
@@ -283,7 +291,7 @@ test("older filter responses cannot overwrite the latest model and successful-ru
   finishes[0]({ estimatedCost: 3 });
   await first;
   assert.equal(element.textContent, "Cost: ≈$0.50");
-  assert.deepEqual(selections, [[[], false], [["gpt-6.1-sol"], false], [["gpt-6.1-sol"], true]]);
+  assert.deepEqual(selections, [[[], false], [["claude-opus-5-5"], false], [["claude-opus-5-5"], true]]);
 });
 
 test("Cost opens a read-only dialog using the selection without clearing it", () => {
@@ -304,7 +312,7 @@ test("Cost opens a read-only dialog using the selection without clearing it", ()
   assert.deepEqual(Array.from(context.dialogFooter.children, child => child.label), ["Refresh", "Close"]);
   const firstFilter = context.state.dialog;
   assert.equal(context.dialogBody.children[1].modelFilter, firstFilter);
-  firstFilter.excludedModels.add("gpt-6.1-sol");
+  firstFilter.excludedModels.add("claude-opus-5-5");
   firstFilter.successfulRunsOnly = true;
   context.openCostDialog([...selection.values()]);
   assert.notEqual(context.state.dialog, firstFilter);

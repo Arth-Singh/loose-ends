@@ -45,11 +45,12 @@ This workflow can be followed through two interfaces:
   The workbench uses these to do the actual work.
   You can also use them for scripting, batch processing, and direct control.
 
-The core that makes this all possible is the
-[Codex CLI](https://learn.chatgpt.com/docs/codex/cli).
-You need this installed, along with an OpenAI account
-(and ideally subscription).
-Loose Ends calls Codex to do all the LLM work.
+The core that makes this all possible is
+[Claude Code](https://code.claude.com/docs/en/overview), run headless
+(`claude -p`) in an OS sandbox. You need it installed and logged in with a
+Claude subscription. Loose Ends calls Claude Code to do all the LLM work.
+This fork targets macOS (and Linux); the original Codex/Windows backend has
+been removed.
 
 Loose Ends itself is written in Python, plus JavaScript in the web app.
 The research CLI tools use only the Python standard library.
@@ -59,16 +60,19 @@ The workbench additionally uses `watchdog` for efficient filesystem updates.
 
 To use Loose Ends, install the following prerequisites if you haven't already:
 
-* [Python 3.11+](https://www.python.org/)
-* Python dependencies: `python -m pip install -r requirements.txt`
-* [Codex CLI](https://learn.chatgpt.com/docs/codex/cli), and run
-  `codex login` to authenticate your account
-* LaTeX, such as [TeX Live](https://www.tug.org/texlive/), including `latexmk`,
-  to write manuscripts
+* [Python 3.11+](https://www.python.org/) (on macOS, `brew install python`;
+  the system `/usr/bin/python3` is too old)
+* Python dependencies: `python3 -m pip install -r requirements.txt`
+* [Claude Code](https://code.claude.com/docs/en/setup); run `claude` once and
+  log in with your Claude subscription. If `ANTHROPIC_API_KEY` is set in your
+  shell, Loose Ends removes it from agent runs so they always use the
+  subscription login.
+* LaTeX with `latexmk`, to write manuscripts. Without admin rights, install
+  [TinyTeX](https://yihui.org/tinytex/) into your home directory, then run
+  `tlmgr install latexmk`; alternatively `brew install --cask mactex-no-gui`.
+  Missing LaTeX packages can be added later with `tlmgr install <package>`.
 
-If you're using Windows + Cygwin, you will get better performance out of
-Windows Python instead of Cygwin Python.  To do so, replace `python` with
-`py -3` in all instructions.
+macOS has no `python` command, so the commands below use `python3`.
 
 ## Quickstart
 
@@ -76,7 +80,7 @@ Start the workbench web server by running the following command
 from the repository root:
 
 ```sh
-python src/workbench.py papers
+python3 src/workbench.py papers
 ```
 
 This command creates `papers/` if necessary, starts the workbench at
@@ -84,7 +88,7 @@ This command creates `papers/` if necessary, starts the workbench at
 under `papers/`, generated manuscripts under `manuscripts/`, and private task
 state under `.loose-ends/`. If you prefer, you can make multiple `papers`
 subdirectories like `papers/edemaine` and `papers/other` and start the
-workbench with both (`python src/workbench.py papers/edemaine papers/other`).
+workbench with both (`python3 src/workbench.py papers/edemaine papers/other`).
 
 Your web browser should automatically open the server at
 `http://localhost:35007/`. Then follow this workflow:
@@ -191,38 +195,31 @@ removal of Activity records. Historical logs are backfilled when available;
 missing usage and unknown model prices are marked as partial. Rebuilding from
 logs can only recover history whose logs are still present.
 
-Prices are API-equivalent token estimates, not subscription charges. The
-versioned rate table in `src/workbench_usage.py` uses current short-context
-rates and 30-minute cache writes, with Fast/Ultrafast multipliers. Unreported
-cache writes use ordinary input rates. Tool fees, long-context premiums, and
-account-specific discounts are excluded. **Pricing details** shows the assumed
-USD-per-million-token rates for each model and service tier in the total,
-including the Fast/Ultrafast multipliers. Unknown rates appear as dashes and
-are excluded from the price estimate. In Cost popups, checkboxes beside the
-models filter token counts, elapsed time, stages, and costs across the popup; a model's
-service tiers are selected together. All models are included when opening a
-popup, and these selections do not change stored usage or the page's total.
-The **Successful runs only** checkbox in **Pricing details** filters tokens,
-costs, and elapsed time to succeeded runs, excluding unsuccessful and active
-runs. For older logs without a managed run status, it uses completed turns.
-It combines with model selections and resets when opening a Cost popup.
-Successful runs can still have missing usage or unknown pricing, so their
-cost estimate may remain partial.
-Raw tokens are stored independently
-of the rate table, so updating prices does not require reimporting logs.
-Cache-write zeros are preserved from Codex logs. Its usage schema permits a
-default zero, so these logs cannot distinguish a measured zero from an
-upstream counter that was not supplied.
+Costs are the API-equivalent estimates that Claude Code itself reports for
+each invocation (`total_cost_usd` in its final `result` event). They include
+cache reads and writes, thinking, and web search. With a Claude subscription
+you are not billed per token; the figures show what the same work would cost
+on the API and are useful for comparing stages, models, and efforts. There is
+no rate table to maintain. **Cost details** lists each model with its
+invocation count and cost. In Cost popups, checkboxes beside the models filter
+token counts, elapsed time, stages, and costs across the popup. All models are
+included when opening a popup, and these selections do not change stored usage
+or the page's total. The **Successful runs only** checkbox in **Cost details**
+filters tokens, costs, and elapsed time to succeeded runs, excluding
+unsuccessful and active runs. For logs without a managed run status, it uses
+completed invocations. It combines with model selections and resets when
+opening a Cost popup. Each invocation's model is the one Claude Code reports
+when the session starts, so aliases such as `sonnet` resolve to the exact
+model.
 
-To use multiple Codex accounts, set **CODEX_HOME** at the bottom of a task's
-**Model and web-search settings** to the directory authenticated for the desired
-account, such as `~/.codex_personal`. A leading `~` expands to the server's
-`$HOME`; leaving the field blank preserves the inherited default. The setting
-applies to that task, including retries. Codex dry runs warn when the selected
-or default home directory is missing. The web app also shows these
-warnings before you start the task. See
-[T3 Code's multiple-account guide](https://github.com/pingdotgg/t3code/blob/main/docs/user/providers-codex.md#use-multiple-accounts)
-for account setup instructions.
+To use more than one Claude account, set **CLAUDE_CONFIG_DIR** at the bottom of
+a task's **Model and web-search settings** to a config directory that is
+logged in to the desired account (run `CLAUDE_CONFIG_DIR=~/.claude-work claude`
+once and log in). A leading `~` expands to the server's `$HOME`; leaving the
+field blank uses the server's default login (`~/.claude`). The setting applies
+to that task, including retries. Dry runs warn when the selected or default
+directory is missing, and the web app shows these warnings before you start
+the task.
 
 ## Download arXiv papers
 
@@ -230,9 +227,9 @@ for account setup instructions.
 source package. It accepts one or many IDs or URLs:
 
 ```sh
-python src/download_arxiv.py 1706.03762
-python src/download_arxiv.py https://arxiv.org/abs/1706.03762v7
-python src/download_arxiv.py 1706.03762 2401.12345 hep-th/9901001 --output-dir papers
+python3 src/download_arxiv.py 1706.03762
+python3 src/download_arxiv.py https://arxiv.org/abs/1706.03762v7
+python3 src/download_arxiv.py 1706.03762 2401.12345 hep-th/9901001 --output-dir papers
 ```
 
 The first example creates:
@@ -313,15 +310,15 @@ request.
 Inspect the results before downloading:
 
 ```sh
-python src/download_arxiv_author.py "Adrian Del Maestro" --list
-python src/download_arxiv_author.py "Adrian Del Maestro" --list --limit 10
+python3 src/download_arxiv_author.py "Adrian Del Maestro" --list
+python3 src/download_arxiv_author.py "Adrian Del Maestro" --list --limit 10
 ```
 
 Download all matches, or just the first few:
 
 ```sh
-python src/download_arxiv_author.py "Adrian Del Maestro" --output-dir papers
-python src/download_arxiv_author.py "Adrian Del Maestro" --limit 10 --output-dir papers
+python3 src/download_arxiv_author.py "Adrian Del Maestro" --output-dir papers
+python3 src/download_arxiv_author.py "Adrian Del Maestro" --limit 10 --output-dir papers
 ```
 
 Name-based author matching is approximate. Common names can refer to multiple
@@ -347,7 +344,7 @@ temporary directory, writes normalized metadata and provenance, and refuses to
 overwrite an existing paper:
 
 ```sh
-python src/ingest_paper.py ~/Downloads/folding-paper.pdf \
+python3 src/ingest_paper.py ~/Downloads/folding-paper.pdf \
   --output-dir papers/edemaine \
   --source ~/src/folding-paper
 ```
@@ -357,7 +354,7 @@ tar.gz archives, and/or source directories. Each input becomes one paper with
 blank title and authors:
 
 ```sh
-python src/ingest_paper.py ~/Downloads/first.pdf ~/Downloads/second.zip \
+python3 src/ingest_paper.py ~/Downloads/first.pdf ~/Downloads/second.zip \
   ~/src/third-paper --output-dir papers/edemaine
 ```
 
@@ -376,7 +373,7 @@ error; the importer does not guess. Metadata, `--name`, and an explicit
 Title and author flags are optional. When omitted, the paper is installed
 immediately with blank `title` and `authors` fields. In the workbench Papers
 tab, select the new paper and choose **Extract metadata** to run a separate,
-managed Codex task. The extractor reads `paper.pdf` plus `source/` when present,
+managed Claude task. The extractor reads `paper.pdf` plus `source/` when present,
 returns schema-constrained title/authors/dates, and preserves local provenance
 and source-specific identifiers. Its dry run, logs, retry behavior, model
 settings, and optional extra prompt are visible like any other managed task.
@@ -389,7 +386,7 @@ unknown fields such as `provenance`.
 Metadata can still be supplied at ingestion time:
 
 ```sh
-python src/ingest_paper.py ~/Downloads/folding-paper.pdf \
+python3 src/ingest_paper.py ~/Downloads/folding-paper.pdf \
   --output-dir papers/edemaine \
   --name folding-paper-2025 \
   --title "A Folding Paper" \
@@ -427,9 +424,9 @@ provenance (for example `arxiv_id`, `doi`, `url`, or `provenance`); consumers
 ignore unknown fields. Directory names do not encode semantics and need only be
 unique within their collection.
 
-## Analyze papers with Codex
+## Analyze papers with Claude
 
-`src/analyze_papers.py` starts one non-interactive Codex CLI agent per paper.
+`src/analyze_papers.py` starts one headless Claude Code agent per paper.
 Each agent reads the rendered PDF and submitted source, then writes three
 human-readable artifacts:
 
@@ -454,62 +451,61 @@ provenance, the ordered paper-author list, and a machine-readable index of the
 `OP-###` entries. The JSONL event stream and stderr log are retained for
 diagnostics.
 
-Install and authenticate the Codex CLI first, then analyze one paper:
+Install Claude Code and log in first, then analyze one paper:
 
 ```sh
-codex login
-python src/analyze_papers.py papers/edemaine/arXiv-0705.4085v1
+claude          # log in once with your Claude subscription, then exit
+python3 src/analyze_papers.py papers/edemaine/arXiv-0705.4085v1
 ```
 
 A parent directory is searched recursively for installed paper directories.
 Run several independent paper agents concurrently with `--jobs`:
 
 ```sh
-python src/analyze_papers.py papers/edemaine --jobs 4
+python3 src/analyze_papers.py papers/edemaine --jobs 4
 ```
 
 The default is one agent at a time. Start with modest concurrency because every
-job consumes Codex capacity independently. All Codex-backed scripts default to
-`--model gpt-6-astra --reasoning-effort xhigh`; use either option to override
-that choice, or `--force` to regenerate a current analysis.
-Parallel jobs are started one second apart to avoid Windows CLI startup races;
-after startup, their paper analyses run concurrently. Pre-thread Windows
-path-startup failures are retried up to twice.
+job draws on the same subscription usage limit. Parallel jobs are started one
+second apart; after startup, their analyses run concurrently. Use `--force` to
+regenerate a current analysis.
 
-The runner also supports Cygwin Python. It keeps local filesystem operations in
-Cygwin path form while converting `-C`, output, schema, and prompt paths to
-Windows form before invoking the Windows-native Codex CLI. On Windows, it also
-omits the per-user Microsoft Store command-alias directory from the Codex
-child's `PATH`; dedicated sandbox users cannot execute aliases such as that
-directory's `pwsh.exe`, while ordinary PowerShell installations elsewhere on
-`PATH` remain available. It also
-adds an inheritable ACL entry for the invoking account so that Cygwin Python can
-validate files created by the restricted Codex sandbox account. After Codex
-finishes, it removes any explicit deny entry for that account and reapplies
-recursive access before validating and cleaning the workspace. If older
-installed outputs still carry those sandbox deny entries, triage
-automatically repairs the selected papers' `analysis/`, `OP-*`, and `.runs/`
-trees before reading them; this is a local ACL operation and starts no model
-turn.
-If only temporary-workspace cleanup fails after installation, the run remains
-successful and the path is recorded as a warning in `run.log`.
+Each invocation runs `claude -p` with:
 
-Every newly launched Codex job writes its structured output directly to
+* `--safe-mode`, `--strict-mcp-config`, and `--no-session-persistence`, so
+  your own `CLAUDE.md`, hooks, skills, plugins, MCP servers, and memory never
+  reach a research run, and runs leave no saved sessions;
+* the macOS Seatbelt (Linux: bubblewrap) sandbox for Bash, which may write only
+  inside the run's workspace and has no network access;
+* `--permission-mode acceptEdits --permission-prompts none` and
+  `blockReadsOutsideWorkingDirectories`, so the file tools can read and edit
+  only the workspace, and any other request is denied instead of waiting;
+* only the tools `Read`, `Write`, `Edit`, `Glob`, `Grep`, and `Bash`, plus
+  `WebSearch` and `WebFetch` when web search is `live`.
+
+Variables that a parent Claude Code session exports (`CLAUDECODE`,
+`CLAUDE_CODE_*`, `CLAUDE_EFFORT`, …) and `ANTHROPIC_API_KEY` are removed from
+the child environment, so a run behaves the same whether the workbench starts
+from a terminal or from inside a Claude Code session.
+
+Every validated job writes its structured output directly to
 `agent-result.json`. The driver stages only that task's checker as
 `validation/validate.py`, together with the small shared
 `validation/common.py` and `validation/expectations.json`, which contains the
 result schema and invocation-specific expected IDs or other dynamic facts.
 The shared agent instructions live in `prompts/validate-output.md` and are
 appended to every task prompt at runtime, including custom prompt templates.
-Before finishing, the agent runs:
+Before finishing, the agent runs the staged checker with the driver's own
+interpreter (macOS has no `python` command, and `/usr/bin/python3` can be too
+old), for example:
 
 ```sh
-python -m validation.validate
+/opt/homebrew/bin/python3 -m validation.validate
 ```
 
 The host reruns the same task-specific `validate()` function with its
 authoritative in-memory expectations before installing anything. If that check
-finds only repairable contract errors, the driver allows one additional Codex
+finds only repairable contract errors, the driver allows one additional Claude
 turn in the preserved workspace with the exact diagnostics. New runs require
 canonical IDs such as `C-001` and canonical structured artifact paths such as
 `artifacts/verifier.py`; permissive normalization remains limited to recovery
@@ -517,27 +513,41 @@ of older preserved workspaces. Changes to validation code participate in job
 configuration digests, so cached output is not silently reused under a new
 validation policy.
 
-For example, the current frontier model with extra-high reasoning is:
+Each stage has its own default model and effort, chosen so cheap models do
+extraction and screening and the strongest model does the mathematics:
+
+| Stage | Script | Default model | Effort |
+|---|---|---|---|
+| Extract metadata | `extract_paper_metadata.py` | `claude-haiku-5-5` | `low` |
+| Analyze | `analyze_papers.py` | `claude-sonnet-5-5` | `high` |
+| Triage | `triage_open_problems.py` | `claude-sonnet-5-5` | `medium` |
+| Literature search | `literature_review.py` | `claude-sonnet-5-5` | `medium` |
+| Solve | `solve_open_problems.py` | `claude-opus-5-5` | `high` |
+| Review attempts | `review_solutions.py` | `claude-opus-5-5` | `high` |
+| Write and revise | `write_paper.py` | `claude-opus-5-5` | `high` |
+
+Override them per run, for example:
 
 ```sh
-python src/analyze_papers.py papers/edemaine \
-  --model gpt-5.6-sol --reasoning-effort xhigh --fast
+python3 src/analyze_papers.py papers/edemaine \
+  --model claude-opus-5-5 --reasoning-effort xhigh --max-budget-usd 5
 ```
 
-Reasoning effort is separate from the model ID. Supported levels include
-`low`, `medium`, `high`, `xhigh`, `max`, and `ultra`; a selected model may
-support only a subset. `--fast` requests Codex's faster service tier for these
-runs without changing the global CLI configuration; Fast mode consumes credits
-at a higher rate. Use `--ultrafast` for the Ultrafast service tier, where the
-selected model and account support it. `--fast` and `--ultrafast` are mutually
-exclusive. Automatic critics inherit the primary tier unless overridden with
-`--review-fast` or `--review-ultrafast`. The workbench exposes Standard, Fast,
-and Ultrafast under **Model and web-search settings → Speed / service tier**.
+`--model` takes a full model ID or an alias (`opus`, `sonnet`, `haiku`,
+`fable`). `--reasoning-effort` is one of `low`, `medium`, `high`, `xhigh`, and
+`max`; a model that does not support a level uses the highest level it supports
+below it. `--max-budget-usd` stops one Claude invocation once its
+API-equivalent cost reaches the limit (the run then fails with
+`error_max_budget_usd` and its workspace is preserved); it is not part of the
+configuration digest, so changing it does not invalidate current results.
+Automatic critics inherit the primary model, effort, and budget unless
+overridden with the `--review-…` options. The workbench exposes the same
+settings under **Model and web-search settings**.
 
-Codex writes in a temporary workspace beneath the paper's `analysis/`
+Claude works in a temporary workspace beneath the paper's `analysis/`
 directory. The runner stages disposable copies of `paper.pdf` and `source/`
-inside that workspace so the Windows sandbox can read the local primary
-sources while the originals remain protected. Generated files are validated
+inside that workspace, because the agent may read nothing outside it, while
+the originals remain protected. Generated files are validated
 and installed only after a successful run; a failed workspace is preserved as
 `analysis/.run-*` for inspection. A successful analysis is skipped when the
 paper content, prompt, schema, and requested model have not changed. Each
@@ -549,7 +559,7 @@ To install previously preserved runs that reached structured status
 `complete`, without spending another model turn, use:
 
 ```sh
-python src/analyze_papers.py papers/edemaine \
+python3 src/analyze_papers.py papers/edemaine \
   --recover-complete --jobs 8
 ```
 
@@ -564,7 +574,7 @@ explicit `--force` run replaces it.
 attempts and critiques. It assigns every selected problem one of three
 classifications:
 
-- `attempt`: there is a concrete, worthwhile Codex line of attack now;
+- `attempt`: there is a concrete, worthwhile line of attack now;
 - `maybe`: exploratory work or a prerequisite may be useful first;
 - `skip`: the problem is currently a poor fit or the supplied history has
   exhausted the plausible approaches.
@@ -574,25 +584,25 @@ approaches—for example, proof search, counterexample search, computation, or a
 reformulation. These are advisory research ideas, not a sequence or dependency
 graph.
 
-Preview the stale work without spending credits, then run it:
+Preview the stale work without using any model time, then run it:
 
 ```sh
-python src/triage_open_problems.py papers/edemaine --dry-run
-python src/triage_open_problems.py papers/edemaine --jobs 4
+python3 src/triage_open_problems.py papers/edemaine --dry-run
+python3 src/triage_open_problems.py papers/edemaine --jobs 4
 ```
 
 Narrow by problem ID or by explicitness:
 
 ```sh
-python src/triage_open_problems.py papers/edemaine/arXiv-... \
+python3 src/triage_open_problems.py papers/edemaine/arXiv-... \
   --problem OP-001 --problem OP-004
-python src/triage_open_problems.py \
+python3 src/triage_open_problems.py \
   papers/edemaine/arXiv-.../OP-00{1,4}
-python src/triage_open_problems.py papers/edemaine \
+python3 src/triage_open_problems.py papers/edemaine \
   --explicitness explicit
 ```
 
-One Codex turn triages all selected stale problems from the same paper. This is
+One Claude invocation triages all selected stale problems from the same paper. This is
 substantially cheaper than starting one turn per problem. The Markdown and
 compact structured record are stored at the paper root:
 
@@ -622,7 +632,7 @@ To triage and immediately feed the `attempt` recommendations into the solver,
 use the composition shortcut:
 
 ```sh
-python src/triage_open_problems.py papers/edemaine \
+python3 src/triage_open_problems.py papers/edemaine \
   --jobs 4 --solve attempt
 ```
 
@@ -635,25 +645,25 @@ different solver and reviewer models are desired.
 
 `src/literature_review.py` is the optional Internet-enabled phase
 between triage and solving. By default it selects current `attempt` and `maybe`
-triages, groups them by paper, and uses one Codex turn per paper to search all
+triages, groups them by paper, and uses one Claude invocation per paper to search all
 selected problems together:
 
 ```sh
-python src/literature_review.py papers/edemaine --dry-run
-python src/literature_review.py papers/edemaine --jobs 4
+python3 src/literature_review.py papers/edemaine --dry-run
+python3 src/literature_review.py papers/edemaine --jobs 4
 ```
 
 Use `--from-triage attempt` to narrow the triage classes, or bypass triage with
 an explicit selection:
 
 ```sh
-python src/literature_review.py papers/edemaine/arXiv-... \
+python3 src/literature_review.py papers/edemaine/arXiv-... \
   --problem OP-002
-python src/literature_review.py \
+python3 src/literature_review.py \
   papers/edemaine/arXiv-.../OP-002
-python src/literature_review.py papers/edemaine/arXiv-... \
+python3 src/literature_review.py papers/edemaine/arXiv-... \
   --all-problems
-python src/literature_review.py papers/edemaine --attempted
+python3 src/literature_review.py papers/edemaine --attempted
 ```
 
 The per-paper run produces independent records under each problem:
@@ -680,17 +690,16 @@ it can search terminology and leads discovered during earlier work. Literature
 currentness remains independent of attempt history: otherwise a solver would
 immediately stale the report it just used before its critic runs. Use
 `--attempted --force` when a literature review should incorporate newer attempt
-history. Live first-party Codex web search is the default; use
-`--web-search indexed` or `--web-search disabled` to reduce or remove live
-access.
+history. Claude's live `WebSearch` and `WebFetch` tools are the default; use
+`--web-search disabled` to remove web access.
 
 If validation or installation preserves a completed `.literature-run-*`
 workspace, the next matching command recovers it before launching another
-Codex turn. `--force` intentionally bypasses both current results and recovery.
+Claude invocation. `--force` intentionally bypasses both current results and recovery.
 
 ## Attempt solutions
 
-`src/solve_open_problems.py` runs one or more adaptive Codex research turns per
+`src/solve_open_problems.py` runs one or more adaptive Claude research turns per
 selected problem. Unlike triage, every solver receives a disposable copy of
 the entire paper—PDF, submitted source, and metadata when present—together with
 the technical analysis, all triage suggestions, and all previous attempts,
@@ -701,7 +710,7 @@ to solve a problem from its short description alone.
 Solve all fresh `attempt` recommendations:
 
 ```sh
-python src/solve_open_problems.py papers/edemaine \
+python3 src/solve_open_problems.py papers/edemaine \
   --from-triage attempt --jobs 4
 ```
 
@@ -711,11 +720,11 @@ try a specific problem without current triage, or every extracted problem, use
 an explicit selector:
 
 ```sh
-python src/solve_open_problems.py papers/edemaine/arXiv-... \
+python3 src/solve_open_problems.py papers/edemaine/arXiv-... \
   --problem OP-003
-python src/solve_open_problems.py \
+python3 src/solve_open_problems.py \
   papers/edemaine/arXiv-.../OP-00{1,4}
-python src/solve_open_problems.py papers/edemaine/arXiv-... \
+python3 src/solve_open_problems.py papers/edemaine/arXiv-... \
   --all-problems
 ```
 
@@ -731,7 +740,7 @@ round in that invocation. It does not replace the paper context, output
 contract, or validation rules:
 
 ```sh
-python src/solve_open_problems.py \
+python3 src/solve_open_problems.py \
   papers/edemaine/arXiv-.../OP-001 \
   --prompt "Try small computational cases before choosing proof or counterexample"
 ```
@@ -762,7 +771,7 @@ problem, while other problems continue. Otherwise, the next solver sees the
 new attempt and critique in its history and can repair it or change direction:
 
 ```sh
-python src/solve_open_problems.py papers/edemaine \
+python3 src/solve_open_problems.py papers/edemaine \
   --from-triage attempt --max-rounds 3 --jobs 4
 ```
 
@@ -797,7 +806,7 @@ novelty: a reconstruction of published work is still mathematically a
 `solution`. External sources on which the active snapshot relies are recorded,
 while literature provenance is owned by `literature_review.py`. Code, data,
 and auxiliary derivations can be retained under `artifacts/`.
-If a completed Codex turn is preserved because driver validation or
+If a completed Claude turn is preserved because driver validation or
 installation fails, retrying the same solve command recovers the matching
 `.solve-run-*` workspace before starting another model turn.
 
@@ -808,10 +817,10 @@ critic turn. Control this with `--review promising`, `--review all`, or
 overridden:
 
 ```sh
-python src/solve_open_problems.py papers/edemaine \
+python3 src/solve_open_problems.py papers/edemaine \
   --from-triage attempt \
-  --model gpt-5.6-sol --reasoning-effort xhigh --fast \
-  --review-model gpt-5.6-sol --review-reasoning-effort ultra
+  --model claude-opus-5-5 --reasoning-effort xhigh --max-budget-usd 20 \
+  --review-model claude-opus-5-5 --review-reasoning-effort max
 ```
 
 The solver prints a final list of reviews with medium or high derived human
@@ -825,12 +834,12 @@ Solver and critic runs default to live first-party web search. Disable it with
 Critics can also be run or rerun independently:
 
 ```sh
-python src/review_solutions.py papers/edemaine --jobs 4
-python src/review_solutions.py papers/edemaine/arXiv-... \
+python3 src/review_solutions.py papers/edemaine --jobs 4
+python3 src/review_solutions.py papers/edemaine/arXiv-... \
   --problem OP-001 --mode all
-python src/review_solutions.py \
+python3 src/review_solutions.py \
   papers/edemaine/arXiv-.../OP-001 --mode all
-python src/review_solutions.py \
+python3 src/review_solutions.py \
   papers/edemaine/arXiv-.../OP-001/attempt-003
 ```
 
@@ -876,11 +885,11 @@ LaTeX build failures remain hard errors.
 The input directories are positional inputs to the same paper:
 
 ```sh
-python src/write_paper.py \
+python3 src/write_paper.py \
   papers/edemaine/arXiv-.../OP-001/attempt-003 \
   --author "A. Author"
 
-python src/write_paper.py \
+python3 src/write_paper.py \
   papers/edemaine/arXiv-.../OP-001/attempt-003 \
   papers/edemaine/arXiv-.../OP-004/attempt-002 \
   --name combined-result \
@@ -891,7 +900,7 @@ An analyzed paper directory selects the latest attempt for every open problem
 that has at least one attempt:
 
 ```sh
-python src/write_paper.py papers/edemaine/arXiv-2207.07229v1
+python3 src/write_paper.py papers/edemaine/arXiv-2207.07229v1
 ```
 
 An `OP-NNN` directory similarly selects that problem's latest attempt. Earlier
@@ -911,7 +920,7 @@ streams receive new IDs.
 Add a human direction to either a first draft or a revision with `--prompt`:
 
 ```sh
-python src/write_paper.py \
+python3 src/write_paper.py \
   papers/edemaine/arXiv-.../OP-001/attempt-003 \
   --prompt "Lead with the constructive interpretation of the result"
 ```
@@ -922,7 +931,7 @@ and sorted problem IDs, such as
 components with `__`; unusually long names are truncated with a stable digest.
 The script never infers authors from an originating paper and emits
 `\author{}` when no `--author` is supplied. Use `--dry-run` to inspect the
-selection, destination, and upstream warnings without starting Codex. The
+selection, destination, and upstream warnings without starting Claude. The
 legacy `--allow-not-ready` option is accepted as a no-op; this is now the
 default behavior. Warnings do not guarantee that the critic will accept the
 result or that the workflow will reach human review.
@@ -934,7 +943,7 @@ an introduction with `Related Work` and `Our Results`, detailed technical
 sections and proofs, and a conclusion recording remaining open problems. This
 outline is a guideline when the mathematics needs a different organization.
 Every originating problem and borrowed result must be cited to a verified
-source. Install `latexmk` as well as Codex: the agent is asked to compile its
+source. Install `latexmk` as well as Claude Code: the agent is asked to compile its
 draft, and the driver independently rebuilds it and rejects missing citations,
 undefined references, unsafe output paths, or broken traceability.
 The writer may create supporting files beneath `figures/`. SVG sources are
@@ -942,8 +951,9 @@ allowed when a same-stem PDF is also generated and listed (for example,
 `figures/construction.svg` and `figures/construction.pdf`); the manuscript
 includes the PDF. The writer can run command-line converters such as Inkscape
 when they are installed, and the driver rejects an unpaired SVG.
-On Windows, the driver can use the Cygwin `latexmk` installation through
-`C:\cygwin64\bin\bash.exe` when no native executable is on `PATH`.
+If `latexmk` is not on `PATH`, the writer fails before starting Claude and
+names the TinyTeX/MacTeX install commands. Pass `--latexmk PATH` to use a
+specific executable.
 
 Every completed draft is independently reviewed. Ordinary major or minor
 writing findings are passed into another complete writing round; mathematical
@@ -953,7 +963,7 @@ with `invalid`, and `ready_for_expert_review` stops early for manual inspection.
 invocation and defaults to one:
 
 ```sh
-python src/write_paper.py \
+python3 src/write_paper.py \
   papers/edemaine/arXiv-.../OP-001/attempt-003 \
   -r 2
 ```
@@ -982,7 +992,7 @@ findings and writes a new draft directory instead of overwriting its parent.
 Continue a reviewed draft explicitly with:
 
 ```sh
-python src/write_paper.py \
+python3 src/write_paper.py \
   --revise manuscripts/arXiv-..._OP-001/draft-001 \
   --max-rounds 2
 ```
@@ -994,20 +1004,20 @@ in those papers and includes newly attempted problems. A changed selection
 starts with an author round before critique:
 
 ```sh
-python src/write_paper.py \
+python3 src/write_paper.py \
   --revise manuscripts/arXiv-..._OP-001/draft-001 \
   --refresh-results
 ```
 
 Combine it with `--dry-run` to inspect the refreshed result IDs and attempt
-paths without starting Codex.
+paths without starting Claude.
 
 Add a human-directed revision goal with `--prompt`. This starts an author round
 immediately, even if the selected draft has no paper review yet, and retains
 the direction across all automatic revision rounds in that invocation:
 
 ```sh
-python src/write_paper.py \
+python3 src/write_paper.py \
   --revise manuscripts/arXiv-..._OP-001/draft-001 \
   --prompt "Add figures illustrating the construction"
 ```
@@ -1027,7 +1037,7 @@ human expert review, never an assertion that the paper is publication-ready.
 critic reviews into a local HTML dashboard:
 
 ```sh
-python src/human_review.py papers/edemaine
+python3 src/human_review.py papers/edemaine
 ```
 
 The command writes `human-review.html` and opens it in a browser. Every
@@ -1073,7 +1083,7 @@ Use `--latest-per-problem` to suppress older selected attempts,
 `--current-only` to omit stale reviews before building the dashboard,
 `--output FILE` to choose the dashboard location, or `--no-open` to avoid
 launching the browser. `--terminal` retains the paged Markdown presentation.
-The command only writes its HTML output and never starts a Codex agent.
+The command only writes its HTML output and never starts a Claude agent.
 
 ## Live research workbench
 
@@ -1082,8 +1092,8 @@ manages persistent CLI tasks. Install its filesystem-watcher dependency, then
 start it on one or more paper roots:
 
 ```sh
-python -m pip install -r requirements.txt
-python src/workbench.py papers/edemaine
+python3 -m pip install -r requirements.txt
+python3 src/workbench.py papers/edemaine
 ```
 
 The workbench opens at `http://localhost:35007/` by default. It watches paper
@@ -1151,23 +1161,25 @@ interrupted and runs that installed no output can be retried. A run that
 installed output before a later phase failed is marked partial so the next
 action can operate on that output without accidentally duplicating it.
 
-In **Activity**, expand **Codex transcript** for a read-only
-transcript: Codex messages appear as Markdown, with expandable task prompts,
-tool activity, and diagnostics. Transcripts refresh while the run is active.
+In **Activity**, expand **Claude transcript** for a read-only
+transcript: Claude's messages appear as Markdown, with expandable task prompts,
+tool calls paired with their results, thinking, the final cost, and
+diagnostics. Transcripts refresh while the run is active.
 The **command & output** fold opens independently.
-Each problem also has a **Full reports → Codex logs** tab for the selected
+Each problem also has a **Full reports → Claude logs** tab for the selected
 attempt's saved solution/review logs and the problem's triage/literature logs.
 It shares the Activity transcript viewer, including expandable tool calls and
 paged loading. Original prompts remain available in Activity for archived runs.
-The **Papers** and **Manuscripts** tabs also have a **Codex logs** fold for
+The **Papers** and **Manuscripts** tabs also have a **Claude logs** fold for
 paper analysis and the selected draft's writing/review logs, respectively.
-New managed runs archive each Codex invocation separately, including repair
+New managed runs archive each Claude invocation separately, including repair
 turns and failures. Older runs use event logs beside their installed artifacts;
 these may reflect later reviews or replacements and do not include the prompt.
 
 Use the worker control in the top bar to change concurrent CLI invocations or
-pause new starts. Codex credit exhaustion automatically pauses the queue;
-replenish credits and use **Resume queue** to restart pending work. Active runs
+pause new starts. Reaching the Claude usage limit (a rejected rate-limit
+event or HTTP 429) automatically pauses the queue and shows when the limit
+resets; use **Resume queue** after that to restart pending work. Active runs
 continue. A task's **Retry all failed/partial** button creates a new task with
 its latest failed and partial runs, using the same commands and settings.
 Partial runs restart their commands and may repeat completed work.
@@ -1205,28 +1217,14 @@ IP-address access and the machine's own hostnames are accepted; use repeatable
 view project data and launch CLI tasks, so do not expose the port to an
 untrusted network or the public internet.
 
-All Codex-backed commands share the analyzer's `--model`,
-`--reasoning-effort`, `--fast`, `--codex`, Cygwin path conversion, Windows ACL
-repair, and transient startup retry behavior. Batch commands also expose
-concurrency controls.
-Automated Codex runs ignore the invoking user's Codex execution settings and
-explicitly disable MCP/plugin app tools, shell network access, automatic MCP
-dependency installation, and nested agent spawning. Paper analysis and triage
-also disable web search; literature, solver, paper writer, and critic runs
-default to live first-party web search, independently of shell network access.
-Saved Codex authentication is still used. With `--ignore-user-config`, the
-launcher explicitly preserves these settings from `$CODEX_HOME/config.toml`
-(default: `~/.codex/config.toml`): `cli_auth_credentials_store`,
-`forced_login_method`, `forced_chatgpt_workspace_id`, `sqlite_home`,
-`model_provider`, the selected `model_providers` entry, `openai_base_url`, and
-`chatgpt_base_url`. Relative SQLite and provider authentication working-directory
-paths resolve from the configuration directory. If `sqlite_home` is absent,
-a nonempty `CODEX_SQLITE_HOME` supplies it. Other environment variables,
-including authentication tokens and certificate settings, remain inherited.
-Missing configuration files use defaults; unreadable or invalid files fail
-before the agent starts. On Windows, the launcher explicitly restores the
-elevated sandbox implementation so `workspace-write` remains effective even
-though user configuration is ignored.
+All Claude-backed commands share the analyzer's `--model`,
+`--reasoning-effort`, `--max-budget-usd`, and `--claude` (executable) options,
+and the same sandbox and isolation flags. Batch commands also expose
+concurrency controls. Paper analysis and triage run without web tools;
+literature, solver, paper writer, and critic runs default to `live`, which
+enables Claude's `WebSearch` and `WebFetch` tools only — shell commands never
+get network access. Your Claude login is still used; set `CLAUDE_CONFIG_DIR`
+to select another logged-in account.
 
 ## Development
 
@@ -1240,11 +1238,11 @@ pnpm --dir test install --frozen-lockfile
 Run the full suite:
 
 ```sh
-python -m unittest discover -s test -v
+python3 -m unittest discover -s test -v
 ```
 
 This also runs the Node renderer tests through a Python wrapper. If pytest is
-installed, `python -m pytest test` runs the same tests. To run just the renderer
+installed, `python3 -m pytest test` runs the same tests. To run just the renderer
 tests, use `pnpm --dir test test`.
 
 The download script batches arXiv metadata API lookups, then downloads content

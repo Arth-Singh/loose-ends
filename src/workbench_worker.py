@@ -23,7 +23,8 @@ except OSError as exc:
     _QUEUE_JOIN_ERROR = exc
 
 import artifact_reporting
-import codex_cli
+import claude_cli
+import transcripts
 from workbench_store import WorkbenchStore
 
 
@@ -135,7 +136,7 @@ def _stop_process_tree(process: subprocess.Popen) -> None:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             check=False,
-            **codex_cli.windowless_popen_options(new_process_group=False),
+            **claude_cli.popen_session_options(new_process_group=False),
         )
     else:
         try:
@@ -174,15 +175,15 @@ def run_worker(database: Path, run_id: str) -> int:
     environment = os.environ.copy()
     plan = store.get_job(run["job_id"])["plan"]
     options = run["options"]
-    if options.get("codexHome"):
-        environment["CODEX_HOME"] = options["codexHome"]
+    if options.get("claudeConfigDir"):
+        environment["CLAUDE_CONFIG_DIR"] = options["claudeConfigDir"]
     environment["PYTHONUNBUFFERED"] = "1"
-    environment[codex_cli.WORKBENCH_DATABASE_ENV] = str(store.database)
-    environment["LOOSE_ENDS_CODEX_TRANSCRIPTS"] = str(log_path.parent / "codex")
+    environment[claude_cli.WORKBENCH_DATABASE_ENV] = str(store.database)
+    environment[transcripts.TRANSCRIPT_ENV] = str(log_path.parent / transcripts.RUN_TRANSCRIPT_DIRECTORY)
     artifact_log = log_path.parent / "artifacts.txt"
     artifact_log.touch(exist_ok=True)
     environment[artifact_reporting.ARTIFACT_LOG_ENV] = str(artifact_log)
-    popen_options = codex_cli.windowless_popen_options()
+    popen_options = claude_cli.popen_session_options()
 
     process: subprocess.Popen | None = None
     canceled = False
@@ -298,7 +299,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    codex_cli.configure_utf8_stdio()
+    claude_cli.configure_utf8_stdio()
     args = build_parser().parse_args(argv)
     return run_worker(args.database.expanduser().resolve(), args.run_id)
 

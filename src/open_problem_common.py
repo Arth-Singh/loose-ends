@@ -16,8 +16,8 @@ import stat
 from typing import Iterable, Sequence
 
 import analyze_papers
-from artifact_reporting import ARTIFACT_LOG_ENV, report_artifacts
-import codex_cli
+from artifact_reporting import ARTIFACT_LOG_ENV as ARTIFACT_LOG_ENV, report_artifacts as report_artifacts
+import claude_cli
 from validation import common as validation_common
 
 
@@ -55,7 +55,7 @@ CLAIMED_RESULT_TYPES = (
     "solution",
     "counterexample",
 )
-CodexError = codex_cli.CodexError
+AgentError = claude_cli.AgentError
 
 
 @dataclass(frozen=True)
@@ -159,7 +159,7 @@ def filter_exact_problems(
             f"{paper}/{problem_id}"
             for paper, problem_id in selectors - found
         )
-        raise CodexError(
+        raise AgentError(
             "direct problem path does not match an extracted problem: "
             + ", ".join(missing)
         )
@@ -188,17 +188,17 @@ def read_json(path: Path, *, description: str | None = None) -> dict:
         value = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError as exc:
         label = description or str(path)
-        raise CodexError(f"missing {label}: {path}") from exc
+        raise AgentError(f"missing {label}: {path}") from exc
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         label = description or str(path)
-        raise CodexError(f"could not read {label}: {exc}") from exc
+        raise AgentError(f"could not read {label}: {exc}") from exc
     if not isinstance(value, dict):
         label = description or str(path)
-        raise CodexError(f"{label} is not a JSON object: {path}")
+        raise AgentError(f"{label} is not a JSON object: {path}")
     reporter = validation_common.Reporter()
     validation_common.validate_control_characters(value, reporter, path=f"{path.name}#")
     if reporter.issues:
-        raise CodexError("\n".join(issue.render() for issue in reporter.issues))
+        raise AgentError("\n".join(issue.render() for issue in reporter.issues))
     return value
 
 
@@ -224,7 +224,7 @@ def load_analysis_manifest(paper_directory: Path) -> dict:
     manifest = read_json(manifest_path, description="paper analysis manifest")
     problems = manifest.get("open_problems")
     if not isinstance(problems, list):
-        raise CodexError(
+        raise AgentError(
             f"analysis manifest has no open-problem list: {manifest_path}"
         )
     return manifest
@@ -249,15 +249,15 @@ def discover_problem_refs(
         title = manifest.get("paper_title")
         authors = manifest.get("paper_authors")
         if not isinstance(title, str) or not title.strip():
-            raise CodexError(f"analysis manifest has no paper title: {manifest_path}")
+            raise AgentError(f"analysis manifest has no paper title: {manifest_path}")
         if not analyze_papers.valid_paper_authors(authors):
-            raise CodexError(
+            raise AgentError(
                 f"analysis manifest has invalid paper authors: {manifest_path}"
             )
         seen: set[str] = set()
         for raw_problem in manifest["open_problems"]:
             if not isinstance(raw_problem, dict):
-                raise CodexError(
+                raise AgentError(
                     f"invalid open-problem entry in {manifest_path}"
                 )
             problem_id = raw_problem.get("id")
@@ -266,7 +266,7 @@ def discover_problem_refs(
                 or not analyze_papers.OPEN_PROBLEM_ID_RE.fullmatch(problem_id)
                 or problem_id in seen
             ):
-                raise CodexError(
+                raise AgentError(
                     f"invalid or duplicate open-problem ID in "
                     f"{manifest_path}: {problem_id!r}"
                 )
@@ -274,11 +274,11 @@ def discover_problem_refs(
             problem_title = raw_problem.get("title")
             problem_explicitness = raw_problem.get("explicitness")
             if not isinstance(problem_title, str) or not problem_title.strip():
-                raise CodexError(
+                raise AgentError(
                     f"open problem {problem_id} has no title in {manifest_path}"
                 )
             if problem_explicitness not in EXPLICITNESS_VALUES:
-                raise CodexError(
+                raise AgentError(
                     f"open problem {problem_id} has invalid explicitness in "
                     f"{manifest_path}"
                 )
@@ -299,11 +299,11 @@ def discover_problem_refs(
             )
     if not selected:
         if analyzed_papers == 0:
-            raise CodexError(
+            raise AgentError(
                 "none of the discovered papers has an analysis/manifest.json"
             )
         qualifier = " matching the requested filters" if problem_ids or explicitness else ""
-        raise CodexError(f"no open problems were found{qualifier}")
+        raise AgentError(f"no open problems were found{qualifier}")
     return selected
 
 
@@ -316,40 +316,6 @@ def group_by_paper(
     for values in grouped.values():
         values.sort(key=lambda item: item.id)
     return dict(sorted(grouped.items(), key=lambda item: os.path.normcase(str(item[0]))))
-
-
-def repair_problem_data_access(
-    paper_directories: Iterable[Path],
-    *,
-    codex_command: str,
-) -> tuple[str | None, int]:
-    """Repair restrictive sandbox ACLs in generated paper data on Windows."""
-    if not codex_cli.is_windows_host():
-        return None, 0
-    inaccessible: list[Path] = []
-    for paper in paper_directories:
-        directories = [paper / "analysis", paper_runs_directory(paper)]
-        try:
-            directories.extend(
-                child
-                for child in paper.iterdir()
-                if child.is_dir()
-                and analyze_papers.OPEN_PROBLEM_ID_RE.fullmatch(child.name)
-            )
-        except OSError:
-            directories.append(paper)
-        for directory in directories:
-            if (
-                directory.is_dir()
-                and not codex_cli.workspace_is_user_accessible(directory)
-            ):
-                inaccessible.append(directory)
-    if not inaccessible:
-        return None, 0
-    codex = codex_cli.resolve_codex_executable(codex_command)
-    for directory in inaccessible:
-        codex_cli.normalize_workspace_access(directory, codex)
-    return codex, len(inaccessible)
 
 
 def _hash_file(digest, path: Path, relative: str) -> None:
@@ -668,10 +634,10 @@ def stage_context(
 ) -> Path:
     """Stage disposable, sandbox-readable context for one paper."""
     if not problems:
-        raise CodexError("cannot stage an empty open-problem set")
+        raise AgentError("cannot stage an empty open-problem set")
     paper = problems[0].paper_directory
     if any(problem.paper_directory != paper for problem in problems):
-        raise CodexError("one workspace cannot mix open problems from different papers")
+        raise AgentError("one workspace cannot mix open problems from different papers")
     inputs = workspace / "inputs"
     inputs.mkdir(parents=True, exist_ok=False)
 
@@ -691,7 +657,7 @@ def stage_context(
     for name in ANALYSIS_FILES:
         source = paper / "analysis" / name
         if not source.is_file():
-            raise CodexError(f"analysis input is missing: {source}")
+            raise AgentError(f"analysis input is missing: {source}")
         shutil.copyfile(source, analysis_input / name)
 
     write_json(
@@ -734,7 +700,6 @@ def stage_context(
                 if source.is_file():
                     _copy_file(source, destination / name)
 
-    codex_cli.grant_sandbox_read_access(inputs)
     return inputs
 
 
@@ -742,17 +707,17 @@ def validate_markdown(path: Path, *, description: str) -> str:
     try:
         contents = path.read_text(encoding="utf-8")
     except FileNotFoundError as exc:
-        raise CodexError(f"Codex did not create {description}: {path.name}") from exc
+        raise AgentError(f"Claude did not create {description}: {path.name}") from exc
     except (OSError, UnicodeError) as exc:
-        raise CodexError(f"could not read generated {description}: {exc}") from exc
+        raise AgentError(f"could not read generated {description}: {exc}") from exc
     reporter = validation_common.Reporter()
     validation_common.validate_control_characters(contents, reporter, path=path.name)
     if reporter.issues:
-        raise CodexError("\n".join(issue.render() for issue in reporter.issues))
+        raise AgentError("\n".join(issue.render() for issue in reporter.issues))
     if not contents.strip():
-        raise CodexError(f"Codex created an empty {description}")
+        raise AgentError(f"Claude created an empty {description}")
     if not contents.lstrip().startswith("#"):
-        raise CodexError(f"generated {description} does not start with a heading")
+        raise AgentError(f"generated {description} does not start with a heading")
     return contents
 
 
@@ -793,5 +758,5 @@ def parse_csv_values(
     if not values or invalid:
         choices = ", ".join(allowed)
         detail = f"; invalid: {', '.join(sorted(invalid))}" if invalid else ""
-        raise CodexError(f"{label} must contain one or more of {choices}{detail}")
+        raise AgentError(f"{label} must contain one or more of {choices}{detail}")
     return values

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import math
 import os
 from pathlib import Path
 import re
@@ -15,7 +16,7 @@ import uuid
 from typing import Iterable
 
 import analyze_papers
-import codex_cli
+import claude_cli
 import download_arxiv
 import open_problem_common as common
 
@@ -41,7 +42,7 @@ MAX_DRY_RUN_WORKERS = 4
 MIN_PRIORITY_LEVEL = -3
 MAX_PRIORITY_LEVEL = 3
 EDITABLE_TASK_OPTIONS = {
-    "codexHome", "model", "reasoningEffort", "fast", "serviceTier", "webSearch", "prompt",
+    "claudeConfigDir", "model", "reasoningEffort", "maxBudgetUsd", "webSearch", "prompt",
     "reviewModel", "reviewReasoningEffort", "reviewWebSearch", "reviewPrompt",
     "maxRounds", "review", "reviewTimeoutMinutes", "includeLiteratureResolved",
     "mode", "timeoutMinutes", "force", "recoverComplete", "authors", "title",
@@ -83,7 +84,7 @@ def task_cli_defaults() -> dict[str, dict[str, str]]:
     return defaults
 
 
-class PlanError(codex_cli.CodexError):
+class PlanError(claude_cli.AgentError):
     pass
 
 
@@ -117,8 +118,8 @@ def _limit_preview_output(output: str) -> tuple[str, bool]:
 def _dry_run_preview(unit: dict, options: dict) -> dict:
     argv = [*unit["argv"], "--dry-run"]
     environment = os.environ.copy()
-    if options.get("codexHome"):
-        environment["CODEX_HOME"] = options["codexHome"]
+    if options.get("claudeConfigDir"):
+        environment["CLAUDE_CONFIG_DIR"] = options["claudeConfigDir"]
     preview = {
         "command": command_display(argv),
         "status": "ok",
@@ -139,7 +140,7 @@ def _dry_run_preview(unit: dict, options: dict) -> dict:
             errors="replace",
             timeout=DRY_RUN_TIMEOUT_SECONDS,
             check=False,
-            **codex_cli.windowless_popen_options(new_process_group=False),
+            **claude_cli.popen_session_options(new_process_group=False),
         )
         preview["exitCode"] = completed.returncode
         if completed.returncode != 0:
@@ -182,10 +183,10 @@ def populate_dry_run_previews(plan: dict) -> dict:
         return plan
     if plan.get("action") != "download":
         environment = os.environ.copy()
-        if plan.get("options", {}).get("codexHome"):
-            environment["CODEX_HOME"] = plan["options"]["codexHome"]
+        if plan.get("options", {}).get("claudeConfigDir"):
+            environment["CLAUDE_CONFIG_DIR"] = plan["options"]["claudeConfigDir"]
         warnings = plan.setdefault("warnings", [])
-        for warning in codex_cli.codex_home_warnings(environment):
+        for warning in claude_cli.agent_config_warnings(environment):
             if warning not in warnings:
                 warnings.append(warning)
     with ThreadPoolExecutor(
@@ -399,20 +400,33 @@ def _common_arguments(
         argv.extend(("--model", value))
     effort = options.get("reasoningEffort")
     if effort:
-        if effort not in codex_cli.REASONING_EFFORTS:
+        if effort not in claude_cli.REASONING_EFFORTS:
             raise PlanError("invalid reasoning effort")
         argv.extend(("--reasoning-effort", effort))
-    tier = options.get("serviceTier") or ("fast" if options.get("fast") is True else "standard")
-    if tier not in {"standard", "fast", "ultrafast"}:
-        raise PlanError("invalid service tier")
-    if tier != "standard":
-        argv.append(f"--{tier}")
+    budget = _budget(options.get("maxBudgetUsd"))
+    if budget is not None:
+        argv.extend(("--max-budget-usd", f"{budget:g}"))
     if web_search:
         mode = options.get("webSearch")
         if mode:
-            if mode not in codex_cli.WEB_SEARCH_MODES:
+            if mode not in claude_cli.WEB_SEARCH_MODES:
                 raise PlanError("invalid web-search mode")
             argv.extend(("--web-search", mode))
+
+
+def _budget(value: object) -> float | None:
+    """Accept a positive USD cap from a form field (number or numeric text)."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        raise PlanError("maxBudgetUsd must be a positive number")
+    try:
+        budget = float(value)
+    except (TypeError, ValueError) as exc:
+        raise PlanError("maxBudgetUsd must be a positive number") from exc
+    if not math.isfinite(budget) or budget <= 0:
+        raise PlanError("maxBudgetUsd must be a positive number")
+    return budget
 
 
 def _review_arguments(argv: list[str], options: dict) -> None:
@@ -422,12 +436,12 @@ def _review_arguments(argv: list[str], options: dict) -> None:
         argv.extend(("--review-model", value))
     effort = options.get("reviewReasoningEffort")
     if effort:
-        if effort not in codex_cli.REASONING_EFFORTS:
+        if effort not in claude_cli.REASONING_EFFORTS:
             raise PlanError("invalid review reasoning effort")
         argv.extend(("--review-reasoning-effort", effort))
     mode = options.get("reviewWebSearch")
     if mode:
-        if mode not in codex_cli.WEB_SEARCH_MODES:
+        if mode not in claude_cli.WEB_SEARCH_MODES:
             raise PlanError("invalid review web-search mode")
         argv.extend(("--review-web-search", mode))
 
@@ -505,16 +519,13 @@ def build_plan(
     if not isinstance(options, dict):
         raise PlanError("task options must be an object")
     options = dict(options)
-    codex_home = _text(options, "codexHome")
-    if codex_home:
-        if "\0" in codex_home:
-            raise PlanError("codexHome must not contain null characters")
-        if codex_home == "~" or codex_home.startswith(("~/", "~\\")):
-            home = os.environ.get("HOME") or str(Path.home())
-            codex_home = home + codex_home[1:]
-        options["codexHome"] = str(Path(codex_home).expanduser().resolve())
+    config_dir = _text(options, "claudeConfigDir")
+    if config_dir:
+        if "\0" in config_dir:
+            raise PlanError("claudeConfigDir must not contain null characters")
+        options["claudeConfigDir"] = str(Path(config_dir).expanduser().resolve())
     else:
-        options.pop("codexHome", None)
+        options.pop("claudeConfigDir", None)
     allowed_roots = list(allowed_roots)
     configured_paper_roots = list(
         allowed_roots if paper_roots is None else paper_roots

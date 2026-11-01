@@ -9,7 +9,9 @@ import tempfile
 import time
 
 
-TRANSCRIPT_ENV = "LOOSE_ENDS_CODEX_TRANSCRIPTS"
+TRANSCRIPT_ENV = "LOOSE_ENDS_AGENT_TRANSCRIPTS"
+# Per-run folder (next to the run log) that holds one subfolder per invocation.
+RUN_TRANSCRIPT_DIRECTORY = "transcripts"
 
 
 def transcript_stage(events: Path) -> str:
@@ -84,7 +86,6 @@ def record_transcript(function):
             sources.update({
                 "model": options.model,
                 "reasoning_effort": options.reasoning_effort,
-                "service_tier": options.service_tier,
             })
         (folder / "prompt.txt").write_text(kwargs["prompt"], encoding="utf-8")
         sources["started_at"] = time.time()

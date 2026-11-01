@@ -5,7 +5,7 @@ const vm = require("node:vm");
 
 const source = readFileSync(`${__dirname}/../src/workbench_web/app.js`, "utf8");
 const functions = [
-  "latestJobRuns", "retryJob", "codexItems", "refreshCodexLogs",
+  "latestJobRuns", "retryJob", "toolSummary", "toolOutput", "resultText", "transcriptItems", "refreshTranscript",
   "separateWriteTasks", "taskRequests", "taskRequestOptions", "taskTargetsForRequest",
   "targetKey", "targetCountLabel", "reviewTask", "confirmTask", "collectDialogOptions",
   "saveProblemEditor", "configuredMemoryLimit", "renderMemoryControl",
@@ -234,26 +234,49 @@ test("failed catalog fetch after saving does not invite another submission", asy
   assert.match(context.notices[1].message, /OP-002 was added/);
 });
 
-test("Codex transcript updates items and keeps repeated IDs in later turns", () => {
+test("Claude transcript pairs tool results by ID and keeps repeated IDs in later sessions", () => {
   const context = vm.createContext({});
   vm.runInContext(functions, context);
+  const tool = (id, command) => ({ type: "tool_use", id, name: "Bash", input: { command } });
+  const result = (id, content, extra = {}) => ({ type: "tool_result", tool_use_id: id, content, ...extra });
   const events = [
-    { type: "turn.started" },
-    { type: "item.started", item: { id: "item_0", type: "command_execution", status: "in_progress" } },
-    { type: "item.completed", item: { id: "item_0", type: "command_execution", status: "completed", aggregated_output: "done" } },
-    { type: "turn.started" },
-    { type: "item.completed", item: { id: "item_0", type: "agent_message", text: "Hello" } },
-    { type: "turn.failed", error: { message: "failure" } },
+    { type: "system", subtype: "init", session_id: "first", model: "claude-opus-5-5", tools: ["Bash", "Read"] },
+    { type: "assistant", message: { content: [
+      { type: "thinking", thinking: "Plan the check." },
+      { type: "text", text: "Hello" },
+      tool("toolu_1", "ls"),
+    ] } },
+    { type: "user", message: { content: [result("toolu_1", [{ type: "text", text: "done" }])] } },
+    { type: "user", message: { content: [result("toolu_missing", "orphan")] } },
+    { type: "rate_limit_event", rate_limit_info: { status: "allowed" } },
+    { duration_ms: 1500, type: "result", subtype: "success", is_error: false, total_cost_usd: .25, num_turns: 2 },
+    { type: "system", subtype: "init", session_id: "repair", model: "claude-opus-5-5" },
+    { type: "assistant", message: { content: [tool("toolu_1", "false")] } },
+    { type: "user", message: { content: [result("toolu_1", "exit 1", { is_error: true })] } },
+    { type: "rate_limit_event", rate_limit_info: { status: "rejected", rateLimitType: "five_hour" } },
+    { type: "result", subtype: "error_max_budget_usd", is_error: true, errors: ["Reached maximum budget"] },
   ].map(value => JSON.stringify(value)).join("\n");
-  const items = context.codexItems(events + "\n--- repair ---\nnull\n{");
-  assert.equal(items.length, 3);
-  assert.equal(items[0].aggregated_output, "done");
-  assert.equal(items[1].text, "Hello");
-  assert.equal(items[2].text, "failure");
+  const items = context.transcriptItems(events + "\n--- repair turn events ---\nnull\n{");
+  assert.deepEqual(Array.from(items, item => item.type), [
+    "session", "thinking", "agent_message", "Bash", "tool_result", "result",
+    "session", "Bash", "error", "error",
+  ]);
+  assert.equal(items[0].detail, "claude-opus-5-5");
+  assert.equal(items[0].output, "Tools: Bash, Read");
+  assert.equal(items[1].output, "Plan the check.");
+  assert.equal(items[2].text, "Hello");
+  assert.deepEqual([items[3].detail, items[3].output, items[3].status], ["ls", "done", "completed"]);
+  assert.deepEqual([items[4].output, items[4].status], ["orphan", "completed"]);
+  assert.equal(items[5].status, "success");
+  assert.equal(items[5].output, "cost $0.2500 · 2 model turn(s) · 1.5 s");
+  assert.deepEqual([items[7].detail, items[7].output, items[7].status], ["false", "exit 1", "failed"]);
+  assert.match(items[8].output, /Usage limit reached \(five_hour window\)/);
+  assert.equal(items[9].status, "error_max_budget_usd");
+  assert.equal(items[9].output, "Reached maximum budget");
 });
 
 test("shared transcript loader preserves report queries and pages both sources", async () => {
-  for (const source of ["/api/runs/run-id/codex", "/api/review-codex?key=attempt&version=2"]) {
+  for (const source of ["/api/runs/run-id/transcript", "/api/review-transcript?key=attempt&version=2"]) {
     const requests = [];
     const pages = [
       { text: "first\n", nextOffset: 6, complete: false },
@@ -261,7 +284,7 @@ test("shared transcript loader preserves report queries and pages both sources",
     ];
     const context = vm.createContext({
       URLSearchParams,
-      state: { codexLogs: new Map(), codexLoads: new Set(), codexTimers: new Map() },
+      state: { transcriptLogs: new Map(), transcriptLoads: new Set(), transcriptTimers: new Map() },
       main: { querySelectorAll: () => [] },
       clearTimeout() {}, setTimeout() { return 1; },
       api: async url => {
@@ -276,9 +299,9 @@ test("shared transcript loader preserves report queries and pages both sources",
     });
     vm.runInContext(functions, context);
     const element = { dataset: { rendered: "true" }, isConnected: true };
-    await context.refreshCodexLogs(source, element);
-    await context.refreshCodexLogs(source, element);
-    assert.equal(context.state.codexLogs.get(source)[0].events, "first\nsecond\n");
+    await context.refreshTranscript(source, element);
+    await context.refreshTranscript(source, element);
+    assert.equal(context.state.transcriptLogs.get(source)[0].events, "first\nsecond\n");
     assert.equal(pages.length, 0);
     assert.equal(requests.filter(url => url.includes("kind=prompt")).length, 0);
   }
@@ -434,7 +457,7 @@ test("only the checked writing mode is collected", () => {
 });
 
 test("editing existing Write settings reviews one fixed task and keeps pinned targets", async () => {
-  const { context, task, requests } = harness({ model: "new-model", codexHome: "/accounts/work" }, [
+  const { context, task, requests } = harness({ model: "new-model", claudeConfigDir: "/accounts/work" }, [
     { kind: "attempt", path: "/paper/OP-001/attempt-001" },
     { kind: "problem", path: "/paper/OP-002" },
   ]);
@@ -444,7 +467,7 @@ test("editing existing Write settings reviews one fixed task and keeps pinned ta
   assert.equal(requests[0].path, "/api/jobs/existing/edit-plan");
   assert.deepEqual(JSON.parse(JSON.stringify(requests[0].body)), {
     id: "existing", runIds: ["pending"], settingsVersion: 4,
-    options: { model: "new-model", codexHome: "/accounts/work" },
+    options: { model: "new-model", claudeConfigDir: "/accounts/work" },
   });
   assert.equal(context.separateWriteTasks(task), false);
   assert.equal(context.taskTargetsForRequest(task)[0].kind, "attempt");
@@ -476,11 +499,12 @@ test("saving a conflicting edit retains input and never starts a replacement tas
   assert.equal(context.state.dialog, null);
   assert.equal(context.loaded, "existing");
   assert.equal(context.state.selection.size, 2);
-  const job = { plan: { options: { codexHome: "/accounts/new" } } };
+  const job = { plan: { options: { claudeConfigDir: "/accounts/new" } } };
   assert.equal(context.runCommandDisplay(job, {
-    argv: ["codex"], options: { codexHome: "/accounts/old account" },
-  }), "CODEX_HOME='/accounts/old account' codex");
-  assert.equal(context.runCommandDisplay(job, { argv: ["codex"], options: {} }), "codex");
+    argv: ["claude"], options: { claudeConfigDir: "/accounts/old account" },
+  }), "CLAUDE_CONFIG_DIR='/accounts/old account' claude");
+  assert.equal(context.runCommandDisplay(job, { argv: ["claude"], options: {} }), "claude");
+  assert.equal(context.runCommandDisplay(job, { argv: ["claude"] }), "CLAUDE_CONFIG_DIR=/accounts/new claude");
 });
 
 function jobsHarness(api) {

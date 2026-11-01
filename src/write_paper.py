@@ -8,7 +8,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 import os
-from pathlib import Path, PurePosixPath, PureWindowsPath
+from pathlib import Path, PurePosixPath
 import re
 import shutil
 import subprocess
@@ -17,7 +17,7 @@ import tempfile
 from typing import Sequence
 
 import analyze_papers
-import codex_cli
+import claude_cli
 import open_problem_common as common
 import review_solutions
 from validation import paper as paper_validation
@@ -73,9 +73,6 @@ PAPER_VERDICTS = (
 )
 REVISION_VERDICTS = {"needs_major_revision", "needs_minor_revision"}
 MAX_DERIVED_NAME_LENGTH = 160
-CYGWIN_ABSOLUTE_PATH_RE = re.compile(
-    r"^/cygdrive/([A-Za-z])(?:/(.*))?$"
-)
 
 
 @dataclass(frozen=True)
@@ -140,53 +137,34 @@ def _stored_manifest_path(path: Path) -> str:
 
 
 def resolve_manifest_path(value: str) -> Path:
-    """Resolve project-relative, Windows, or Cygwin paths on either host."""
-    windows_path = PureWindowsPath(value)
-    if windows_path.is_absolute():
-        if sys.platform == "cygwin":
-            drive = windows_path.drive.rstrip(":").casefold()
-            return (
-                Path("/cygdrive") / drive / Path(*windows_path.parts[1:])
-            ).resolve()
-        if os.name == "nt":
-            return Path(windows_path).resolve()
-    cygwin_match = CYGWIN_ABSOLUTE_PATH_RE.fullmatch(value)
-    if cygwin_match and os.name == "nt":
-        tail = cygwin_match.group(2)
-        parts = tail.split("/") if tail else []
-        drive_root = f"{cygwin_match.group(1)}:\\"
-        return Path(PureWindowsPath(drive_root, *parts)).resolve()
+    """Resolve a stored path: project-relative or absolute."""
     path = Path(value).expanduser()
     if not path.is_absolute():
         path = PROJECT_ROOT / path
     return path.resolve()
 
 
-# Kept as an alias for internal callers and compatibility with older imports.
-_resolve_manifest_path = resolve_manifest_path
-
-
 def _read_text(path: Path, description: str) -> str:
     try:
         value = path.read_text(encoding="utf-8")
     except FileNotFoundError as exc:
-        raise common.CodexError(f"missing {description}: {path}") from exc
+        raise common.AgentError(f"missing {description}: {path}") from exc
     except (OSError, UnicodeError) as exc:
-        raise common.CodexError(f"could not read {description}: {exc}") from exc
+        raise common.AgentError(f"could not read {description}: {exc}") from exc
     if not value.strip():
-        raise common.CodexError(f"{description} is empty: {path}")
+        raise common.AgentError(f"{description} is empty: {path}")
     return value
 
 
 def _attempt_from_path(path: Path) -> review_solutions.AttemptRef:
     directory = path.expanduser().resolve()
     if not directory.is_dir() or not ATTEMPT_RE.fullmatch(directory.name):
-        raise common.CodexError(
+        raise common.AgentError(
             f"attempt path must name an attempt-NNN directory: {path}"
         )
     problem_directory = directory.parent
     if not analyze_papers.OPEN_PROBLEM_ID_RE.fullmatch(problem_directory.name):
-        raise common.CodexError(
+        raise common.AgentError(
             f"attempt path is not under PAPER/OP-NNN: {directory}"
         )
     paper_directory = problem_directory.parent
@@ -201,7 +179,7 @@ def _attempt_from_path(path: Path) -> review_solutions.AttemptRef:
         and problem.id == problem_directory.name
     ]
     if len(exact) != 1:
-        raise common.CodexError(
+        raise common.AgentError(
             f"could not identify the open problem for {directory}"
         )
     solver_result = common.read_json(
@@ -226,7 +204,7 @@ def input_selectors(paths: Sequence[Path]) -> list[dict]:
         elif (path / "analysis" / "manifest.json").is_file():
             kind = "paper"
         else:
-            raise common.CodexError(
+            raise common.AgentError(
                 "paper input must name an analyzed paper, an OP-NNN "
                 f"directory, or an attempt-NNN directory: {raw_path}"
             )
@@ -243,7 +221,7 @@ def set_input_pinning(
     """Change only how a completed draft selects inputs for future revisions."""
     draft = draft_directory.expanduser().resolve()
     if not draft.is_dir() or DRAFT_RE.fullmatch(draft.name) is None:
-        raise common.CodexError("manuscript input pinning requires a draft-NNN directory")
+        raise common.AgentError("manuscript input pinning requires a draft-NNN directory")
     manifest_path = draft / "manifest.json"
     manifest = common.read_json(
         manifest_path,
@@ -251,16 +229,16 @@ def set_input_pinning(
     )
     records = manifest.get("input_attempts")
     if not isinstance(records, list) or not records:
-        raise common.CodexError("draft manifest has no input attempts to pin")
+        raise common.AgentError("draft manifest has no input attempts to pin")
     attempt_paths: list[Path] = []
     for record in records:
         if not isinstance(record, dict) or not isinstance(
             record.get("attempt_path"), str
         ):
-            raise common.CodexError("draft manifest has invalid input_attempts")
+            raise common.AgentError("draft manifest has invalid input_attempts")
         attempt = resolve_manifest_path(record["attempt_path"])
         if ATTEMPT_RE.fullmatch(attempt.name) is None:
-            raise common.CodexError("draft manifest has invalid input_attempts")
+            raise common.AgentError("draft manifest has invalid input_attempts")
         attempt_paths.append(attempt)
 
     selected_problem = (
@@ -273,7 +251,7 @@ def set_input_pinning(
             path for path in attempt_paths if path.parent == selected_problem
         ]
         if len(matching_attempts) != 1:
-            raise common.CodexError(
+            raise common.AgentError(
                 "the selected problem is not a unique input to this draft"
             )
         selected_attempt = matching_attempts[0]
@@ -291,7 +269,7 @@ def set_input_pinning(
                 for path in attempt_paths
             ]
         if not isinstance(original, list):
-            raise common.CodexError("draft manifest has invalid input_selectors")
+            raise common.AgentError("draft manifest has invalid input_selectors")
         selectors = []
         for selector in original:
             if (
@@ -301,7 +279,7 @@ def set_input_pinning(
                 }
                 or not isinstance(selector.get("path"), str)
             ):
-                raise common.CodexError("draft manifest has invalid input_selectors")
+                raise common.AgentError("draft manifest has invalid input_selectors")
             kind = selector["kind"]
             path = resolve_manifest_path(selector["path"])
             if selected_problem is None and kind == "pin":
@@ -367,7 +345,7 @@ def set_input_pinning(
 
 
 def _selector_paper(selector: dict) -> Path:
-    path = _resolve_manifest_path(selector["path"])
+    path = resolve_manifest_path(selector["path"])
     if selector["kind"] == "paper":
         return path
     if selector["kind"] == "problem":
@@ -390,12 +368,12 @@ def resolve_input_selectors(
             }
             or not isinstance(selector.get("path"), str)
         ):
-            raise common.CodexError("draft manifest has invalid input selectors")
+            raise common.AgentError("draft manifest has invalid input selectors")
         normalized.append(
             {
                 "kind": selector["kind"],
                 "path": _stored_manifest_path(
-                    _resolve_manifest_path(selector["path"])
+                    resolve_manifest_path(selector["path"])
                 ),
             }
         )
@@ -419,12 +397,12 @@ def resolve_input_selectors(
     pins: list[Path] = []
     warnings: list[str] = []
     for selector in effective:
-        path = _resolve_manifest_path(selector["path"])
+        path = resolve_manifest_path(selector["path"])
         kind = selector["kind"]
         if kind in {"attempt", "pin"} and (
             not path.is_dir() or not ATTEMPT_RE.fullmatch(path.name)
         ):
-            raise common.CodexError(
+            raise common.AgentError(
                 f"draft {kind} selector is missing or invalid: {path}"
             )
         if kind == "problem" and (
@@ -432,13 +410,13 @@ def resolve_input_selectors(
             or not analyze_papers.OPEN_PROBLEM_ID_RE.fullmatch(path.name)
             or not (path.parent / "analysis" / "manifest.json").is_file()
         ):
-            raise common.CodexError(
+            raise common.AgentError(
                 f"draft problem selector is missing or invalid: {path}"
             )
         if kind == "paper" and not (
             path / "analysis" / "manifest.json"
         ).is_file():
-            raise common.CodexError(
+            raise common.AgentError(
                 f"draft paper selector is missing or invalid: {path}"
             )
         if kind == "pin":
@@ -455,7 +433,7 @@ def resolve_input_selectors(
         else:
             problems = common.discover_problem_refs([path])
         if not problems:
-            raise common.CodexError(f"paper input has no open problems: {path}")
+            raise common.AgentError(f"paper input has no open problems: {path}")
         for problem in problems:
             available = common.attempt_directories(problem)
             if available:
@@ -472,7 +450,7 @@ def resolve_input_selectors(
             if attempt.parent == pin.parent
         ]
         if not matching:
-            raise common.CodexError(
+            raise common.AgentError(
                 f"draft pin selector has no matching problem input: {pin}"
             )
         for index in matching:
@@ -493,7 +471,7 @@ def _prior_attempt_directories(
     try:
         index = available.index(attempt.directory)
     except ValueError as exc:
-        raise common.CodexError(
+        raise common.AgentError(
             f"selected attempt is not in its problem history: {attempt.directory}"
         ) from exc
     return available[:index]
@@ -578,11 +556,11 @@ def load_paper_inputs(
     preferred_result_ids: dict[tuple[str, str], str] | None = None,
 ) -> list[PaperInput]:
     if not attempt_paths:
-        raise common.CodexError("select at least one solver attempt")
+        raise common.AgentError("select at least one solver attempt")
     attempts = [_attempt_from_path(path) for path in attempt_paths]
     resolved_paths = [attempt.directory for attempt in attempts]
     if len(set(resolved_paths)) != len(resolved_paths):
-        raise common.CodexError("the same solver attempt was selected more than once")
+        raise common.AgentError("the same solver attempt was selected more than once")
     attempts.sort(
         key=lambda attempt: (
             os.path.normcase(str(attempt.problem.paper_directory)),
@@ -663,7 +641,7 @@ def derive_manuscript_name(inputs: Sequence[PaperInput]) -> str:
 
 def validate_manuscript_name(value: str) -> str:
     if not SAFE_NAME_RE.fullmatch(value) or value in {".", ".."}:
-        raise common.CodexError(
+        raise common.AgentError(
             "--name must contain only letters, digits, dots, underscores, "
             "and hyphens, and must start with a letter or digit"
         )
@@ -773,7 +751,7 @@ def stage_paper_context(
         for name in common.ANALYSIS_FILES:
             source = paper / "analysis" / name
             if not source.is_file():
-                raise common.CodexError(f"analysis input is missing: {source}")
+                raise common.AgentError(f"analysis input is missing: {source}")
             shutil.copyfile(source, analysis / name)
         representative = next(
             item.attempt.problem
@@ -866,7 +844,6 @@ def stage_paper_context(
             "manuscript_path": "manuscript" if manuscript is not None else None,
         },
     )
-    codex_cli.grant_sandbox_read_access(root)
     return root
 
 
@@ -928,7 +905,7 @@ def render_writer_prompt(
         )
     return (
         template.replace("{{MODE_INSTRUCTION}}", mode)
-        .replace("{{CONTEXT_DIRECTORY}}", codex_cli.path_for_codex(context))
+        .replace("{{CONTEXT_DIRECTORY}}", str(context))
         .replace(
             "{{MANUSCRIPT_METADATA_JSON}}",
             json.dumps(
@@ -949,10 +926,10 @@ def render_reviewer_prompt(
     return (
         template.replace(
             "{{MANUSCRIPT_DIRECTORY}}",
-            codex_cli.path_for_codex(manuscript),
+            str(manuscript),
         ).replace(
             "{{CONTEXT_DIRECTORY}}",
-            codex_cli.path_for_codex(context),
+            str(context),
         )
     )
 
@@ -962,7 +939,7 @@ def _string_list(result: dict, field: str) -> list[str]:
     if not isinstance(value, list) or not all(
         isinstance(item, str) for item in value
     ):
-        raise common.CodexError(f"paper response has invalid {field}")
+        raise common.AgentError(f"paper response has invalid {field}")
     return value
 
 
@@ -988,7 +965,7 @@ def _generated_files(workspace: Path, values: object) -> list[Path]:
     if not isinstance(values, list) or not all(
         isinstance(value, str) for value in values
     ):
-        raise common.CodexError("paper response has invalid generated_files")
+        raise common.AgentError("paper response has invalid generated_files")
     paths: list[Path] = []
     seen: set[str] = set()
     standard_outputs = {
@@ -1010,13 +987,13 @@ def _generated_files(workspace: Path, values: object) -> list[Path]:
                 and relative.parts[0] not in {"figures", "code"}
             )
         ):
-            raise common.CodexError(
+            raise common.AgentError(
                 f"paper response has unsafe generated file: {value!r}"
             )
         seen.add(normalized)
         path = workspace.joinpath(*relative.parts)
         if not path.is_file():
-            raise common.CodexError(
+            raise common.AgentError(
                 f"paper-listed generated file does not exist: {value}"
             )
         if normalized not in standard_outputs:
@@ -1030,7 +1007,7 @@ def _generated_files(workspace: Path, values: object) -> list[Path]:
             continue
         pdf = relative.with_suffix(".pdf").as_posix()
         if pdf not in seen:
-            raise common.CodexError(
+            raise common.AgentError(
                 "generated SVG must include a matching PDF: "
                 f"{normalized} -> {pdf}"
             )
@@ -1049,14 +1026,14 @@ def _previous_finding_ids(previous: DraftRef | None) -> set[str]:
     )
     findings = review.get("findings")
     if not isinstance(findings, list):
-        raise common.CodexError("previous paper review has invalid findings")
+        raise common.AgentError("previous paper review has invalid findings")
     ids = {
         finding.get("id")
         for finding in findings
         if isinstance(finding, dict) and isinstance(finding.get("id"), str)
     }
     if len(ids) != len(findings):
-        raise common.CodexError("previous paper review has invalid finding IDs")
+        raise common.AgentError("previous paper review has invalid finding IDs")
     return ids
 
 
@@ -1073,7 +1050,7 @@ def _previous_addressed_finding_ids(previous: DraftRef | None) -> set[str]:
     )
     addressed = result.get("addressed_findings")
     if not isinstance(addressed, list):
-        raise common.CodexError(
+        raise common.AgentError(
             "previous paper result has invalid addressed_findings"
         )
     ids = {
@@ -1082,7 +1059,7 @@ def _previous_addressed_finding_ids(previous: DraftRef | None) -> set[str]:
         if isinstance(item, dict) and isinstance(item.get("finding_id"), str)
     }
     if len(ids) != len(addressed):
-        raise common.CodexError(
+        raise common.AgentError(
             "previous paper result has invalid addressed finding IDs"
         )
     return ids
@@ -1136,13 +1113,13 @@ def _normalize_manuscript_labels(
                             break
                         canonical_labels.append(next(iter(candidates)))
             if not canonical_labels:
-                raise common.CodexError(
+                raise common.AgentError(
                     f"main.tex omits structured manuscript label {label}"
                 )
             repairs.append((label, ", ".join(canonical_labels)))
         for canonical in canonical_labels:
             if canonical in normalized:
-                raise common.CodexError(
+                raise common.AgentError(
                     f"paper result has duplicate manuscript label {canonical}"
                 )
             normalized.append(canonical)
@@ -1161,23 +1138,23 @@ def validate_paper_result(
     result = common.read_json(result_path, description="paper response")
     status = result.get("status")
     if status not in PAPER_STATUSES:
-        raise common.CodexError("paper response has invalid status")
+        raise common.AgentError("paper response has invalid status")
     for field in ("title", "summary"):
         if not isinstance(result.get(field), str) or not result[field].strip():
-            raise common.CodexError(f"paper response has invalid {field}")
+            raise common.AgentError(f"paper response has invalid {field}")
     _string_list(result, "unresolved_issues")
     _string_list(result, "warnings")
     expected_results = {item.result_id: item for item in inputs}
     rows = result.get("results")
     if not isinstance(rows, list):
-        raise common.CodexError("paper response has invalid results")
+        raise common.AgentError("paper response has invalid results")
     seen_results: set[str] = set()
     for row in rows:
         if not isinstance(row, dict):
-            raise common.CodexError("paper result entry is not an object")
+            raise common.AgentError("paper result entry is not an object")
         result_id = row.get("result_id")
         if result_id not in expected_results or result_id in seen_results:
-            raise common.CodexError(
+            raise common.AgentError(
                 f"paper response has invalid or duplicate result {result_id!r}"
             )
         seen_results.add(result_id)
@@ -1186,14 +1163,14 @@ def validate_paper_result(
             "included_supporting",
             "excluded",
         }:
-            raise common.CodexError(
+            raise common.AgentError(
                 f"paper result {result_id} has invalid disposition"
             )
         claims = row.get("source_claim_ids")
         if not isinstance(claims, list) or not all(
             isinstance(claim, str) for claim in claims
         ) or len(set(claims)) != len(claims):
-            raise common.CodexError(
+            raise common.AgentError(
                 f"paper result {result_id} has invalid source_claim_ids"
             )
         available_claims = {
@@ -1207,53 +1184,53 @@ def validate_paper_result(
             not CLAIM_ID_RE.fullmatch(claim) or claim not in available_claims
             for claim in claims
         ):
-            raise common.CodexError(
+            raise common.AgentError(
                 f"paper result {result_id} references an unknown solver claim"
             )
         labels = row.get("manuscript_labels")
         if not isinstance(labels, list) or not all(
             isinstance(label, str) and label.strip() for label in labels
         ):
-            raise common.CodexError(
+            raise common.AgentError(
                 f"paper result {result_id} has invalid manuscript_labels"
             )
         if row["disposition"] != "excluded" and (not claims or not labels):
-            raise common.CodexError(
+            raise common.AgentError(
                 f"included paper result {result_id} has no claims or labels"
             )
         if not isinstance(row.get("explanation"), str):
-            raise common.CodexError(
+            raise common.AgentError(
                 f"paper result {result_id} has invalid explanation"
             )
     if seen_results != set(expected_results):
         missing = set(expected_results).difference(seen_results)
-        raise common.CodexError(
+        raise common.AgentError(
             "paper response omitted selected results: " + ", ".join(sorted(missing))
         )
     unresolved = result["unresolved_issues"]
     if status == "draft_complete" and (
         unresolved or any(row["disposition"] == "excluded" for row in rows)
     ):
-        raise common.CodexError(
+        raise common.AgentError(
             "draft_complete paper has unresolved issues or excluded results"
         )
     if status == "blocked" and not unresolved:
-        raise common.CodexError("blocked paper has no unresolved issues")
+        raise common.AgentError("blocked paper has no unresolved issues")
     previous_ids = _previous_finding_ids(previous)
     historical_ids = _previous_addressed_finding_ids(previous)
     addressed = result.get("addressed_findings")
     if not isinstance(addressed, list):
-        raise common.CodexError("paper response has invalid addressed_findings")
+        raise common.AgentError("paper response has invalid addressed_findings")
     addressed_ids: set[str] = set()
     reported_ids: set[str] = set()
     current_addressed: list[dict] = []
     repeated_historical_ids: set[str] = set()
     for item in addressed:
         if not isinstance(item, dict):
-            raise common.CodexError("addressed finding is not an object")
+            raise common.AgentError("addressed finding is not an object")
         finding_id = item.get("finding_id")
         if finding_id in reported_ids:
-            raise common.CodexError(
+            raise common.AgentError(
                 f"paper response has invalid addressed finding {finding_id!r}"
             )
         reported_ids.add(finding_id)
@@ -1262,7 +1239,7 @@ def validate_paper_result(
             "not_resolved",
             "rejected",
         } or not isinstance(item.get("explanation"), str):
-            raise common.CodexError(
+            raise common.AgentError(
                 f"paper response has invalid disposition for {finding_id}"
             )
         if finding_id in previous_ids:
@@ -1271,11 +1248,11 @@ def validate_paper_result(
         elif finding_id in historical_ids:
             repeated_historical_ids.add(finding_id)
         else:
-            raise common.CodexError(
+            raise common.AgentError(
                 f"paper response has invalid addressed finding {finding_id!r}"
             )
     if addressed_ids != previous_ids:
-        raise common.CodexError(
+        raise common.AgentError(
             "paper response did not address every previous critic finding"
         )
     if repeated_historical_ids:
@@ -1316,43 +1293,43 @@ def validate_paper_result(
         ]
     for required in (r"\documentclass", r"\begin{document}", r"\end{document}"):
         if required not in tex:
-            raise common.CodexError(f"main.tex omits {required}")
+            raise common.AgentError(f"main.tex omits {required}")
     if not re.search(r"\\title\s*\{", tex):
-        raise common.CodexError("main.tex has no title")
+        raise common.AgentError("main.tex has no title")
     if not re.search(r"\\date\s*\{\s*\}", tex):
-        raise common.CodexError("main.tex must always use \\date{}")
+        raise common.AgentError("main.tex must always use \\date{}")
     if authors is not None and not authors:
         if not re.search(r"\\author\s*\{\s*\}", tex):
-            raise common.CodexError(
+            raise common.AgentError(
                 "main.tex must use \\author{} when no author is supplied"
             )
     if not re.search(r"\\begin\s*\{abstract\}", tex):
-        raise common.CodexError("main.tex has no abstract")
+        raise common.AgentError("main.tex has no abstract")
     citation_keys = _tex_citation_keys(tex)
     bibliography_keys = _bib_keys(bib)
     if not citation_keys:
-        raise common.CodexError("main.tex contains no citations")
+        raise common.AgentError("main.tex contains no citations")
     missing_bib = citation_keys.difference(bibliography_keys)
     if missing_bib:
-        raise common.CodexError(
+        raise common.AgentError(
             "main.tex cites missing bibliography keys: "
             + ", ".join(sorted(missing_bib))
         )
     citations = result.get("citations")
     if not isinstance(citations, list):
-        raise common.CodexError("paper response has invalid citations")
+        raise common.AgentError("paper response has invalid citations")
     origin_coverage: set[str] = set()
     structured_keys: set[str] = set()
     for citation in citations:
         if not isinstance(citation, dict):
-            raise common.CodexError("paper citation entry is not an object")
+            raise common.AgentError("paper citation entry is not an object")
         key = citation.get("bib_key")
         if (
             key in structured_keys
             or key not in bibliography_keys
             or key not in citation_keys
         ):
-            raise common.CodexError(
+            raise common.AgentError(
                 f"structured citation is duplicate, unused, or undefined: {key!r}"
             )
         structured_keys.add(key)
@@ -1360,10 +1337,10 @@ def validate_paper_result(
         if not isinstance(url, str) or (
             url and not url.startswith(("https://", "http://"))
         ):
-            raise common.CodexError(f"paper citation {key} has invalid URL")
+            raise common.AgentError(f"paper citation {key} has invalid URL")
         for field in ("title", "verification"):
             if not isinstance(citation.get(field), str) or not citation[field].strip():
-                raise common.CodexError(
+                raise common.AgentError(
                     f"paper citation {key} has invalid {field}"
                 )
         if citation.get("role") not in {
@@ -1372,41 +1349,41 @@ def validate_paper_result(
             "technique",
             "other",
         }:
-            raise common.CodexError(f"paper citation {key} has invalid role")
+            raise common.AgentError(f"paper citation {key} has invalid role")
         result_ids = citation.get("result_ids")
         if not isinstance(result_ids, list) or any(
             result_id not in expected_results for result_id in result_ids
         ):
-            raise common.CodexError(
+            raise common.AgentError(
                 f"paper citation {key} has invalid result_ids"
             )
         if citation["role"] == "original_problem":
             origin_coverage.update(result_ids)
     if origin_coverage != set(expected_results):
         missing = set(expected_results).difference(origin_coverage)
-        raise common.CodexError(
+        raise common.AgentError(
             "paper response lacks originating-paper citations for: "
             + ", ".join(sorted(missing))
         )
     if structured_keys != citation_keys or bibliography_keys != citation_keys:
-        raise common.CodexError(
+        raise common.AgentError(
             "main.tex, references.bib, and structured citation keys do not match"
         )
     for result_id in expected_results:
         if result_id not in readiness:
-            raise common.CodexError(f"readiness.md omits {result_id}")
+            raise common.AgentError(f"readiness.md omits {result_id}")
     for row in rows:
         for claim_id in row["source_claim_ids"]:
             if claim_id not in readiness:
-                raise common.CodexError(f"readiness.md omits {claim_id}")
+                raise common.AgentError(f"readiness.md omits {claim_id}")
         for label in row["manuscript_labels"]:
             if f"\\label{{{label}}}" not in tex:
-                raise common.CodexError(
+                raise common.AgentError(
                     f"main.tex omits structured manuscript label {label}"
                 )
     for finding_id in previous_ids:
         if finding_id not in readiness:
-            raise common.CodexError(f"readiness.md omits {finding_id}")
+            raise common.AgentError(f"readiness.md omits {finding_id}")
     generated = _generated_files(workspace, result.get("generated_files"))
     result["generated_files"] = [
         path.relative_to(workspace).as_posix() for path in generated
@@ -1416,29 +1393,12 @@ def validate_paper_result(
 
 def resolve_latexmk(value: str) -> tuple[str, ...]:
     executable = shutil.which(value)
-    if executable is not None:
-        return (executable,)
-    cygwin_bash = Path("C:/cygwin64/bin/bash.exe")
-    if codex_cli.is_windows_host() and value == "latexmk" and cygwin_bash.is_file():
-        try:
-            available = subprocess.run(
-                [str(cygwin_bash), "-c", "command -v latexmk"],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-        except OSError:
-            available = None
-        if available is not None and available.returncode == 0:
-            return (
-                str(cygwin_bash),
-                "-c",
-                'exec latexmk "$@"',
-                "latexmk",
-            )
-    raise common.CodexError(
-        f"could not find the LaTeX build executable {value!r} on PATH"
-    )
+    if executable is None:
+        raise common.AgentError(
+            f"could not find the LaTeX build executable {value!r} on PATH; "
+            "on macOS, install TinyTeX or MacTeX and `tlmgr install latexmk`"
+        )
+    return (executable,)
 
 
 def compile_latex(
@@ -1465,25 +1425,25 @@ def compile_latex(
                 check=False,
             )
     except OSError as exc:
-        raise common.CodexError(f"could not run latexmk: {exc}") from exc
+        raise common.AgentError(f"could not run latexmk: {exc}") from exc
     if completed.returncode != 0:
-        raise common.CodexError(
+        raise common.AgentError(
             f"LaTeX build failed with status {completed.returncode}; "
             f"see {log_path}"
         )
     pdf = workspace / "main.pdf"
     if not pdf.is_file() or pdf.stat().st_size == 0:
-        raise common.CodexError("LaTeX build did not create a nonempty main.pdf")
+        raise common.AgentError("LaTeX build did not create a nonempty main.pdf")
     final_tex_log = workspace / "main.log"
     inspected_log = final_tex_log if final_tex_log.is_file() else log_path
     try:
         log_bytes = inspected_log.read_bytes()
     except OSError as exc:
-        raise common.CodexError(
+        raise common.AgentError(
             f"could not read final LaTeX log: {exc}"
         ) from exc
     if not log_bytes.strip():
-        raise common.CodexError(f"final LaTeX log is empty: {inspected_log}")
+        raise common.AgentError(f"final LaTeX log is empty: {inspected_log}")
     # TeX and BibTeX logs can contain locale-encoded author names even when
     # the source is UTF-8.  The diagnostics checked below are ASCII, so retain
     # them while replacing undecodable name bytes.
@@ -1494,7 +1454,7 @@ def compile_latex(
         "citation `",
     )
     if any(pattern in log_text for pattern in bad_patterns) and "undefined" in log_text:
-        raise common.CodexError("LaTeX build log reports undefined citations or references")
+        raise common.AgentError("LaTeX build log reports undefined citations or references")
     return pdf
 
 
@@ -1568,13 +1528,13 @@ def _install_draft(
     title_hint: str | None,
     revision_instruction: str | None,
     config_digest: str,
-    codex_version: str,
-    options: codex_cli.ModelOptions,
+    claude_version: str,
+    options: claude_cli.ModelOptions,
     web_search: str,
 ) -> DraftRef:
     destination = manuscript_directory / f"draft-{draft_number:03d}"
     if destination.exists():
-        raise common.CodexError(f"draft destination already exists: {destination}")
+        raise common.AgentError(f"draft destination already exists: {destination}")
     staging = Path(
         tempfile.mkdtemp(prefix=".draft-install-", dir=manuscript_directory)
     )
@@ -1626,11 +1586,10 @@ def _install_draft(
                 "title_hint": title_hint,
                 "revision_instruction": revision_instruction,
                 "config_digest": config_digest,
-                "codex_version": codex_version,
+                "claude_version": claude_version,
                 "requested_model": options.model,
                 "requested_reasoning_effort": options.reasoning_effort,
-                "requested_fast_mode": options.fast,
-                "requested_service_tier": options.service_tier,
+                "requested_max_budget_usd": options.max_budget_usd,
                 "requested_web_search": web_search,
                 "status": result["status"],
                 "title": result["title"],
@@ -1638,7 +1597,7 @@ def _install_draft(
         )
         os.replace(staging, destination)
     except OSError as exc:
-        raise common.CodexError(
+        raise common.AgentError(
             f"could not install paper draft; staging preserved at {staging}: {exc}"
         ) from exc
     installed_artifacts = [
@@ -1668,15 +1627,15 @@ def run_author_round(
     authors: Sequence[str],
     title_hint: str | None,
     revision_instruction: str | None,
-    codex: str,
-    codex_version: str,
+    claude: str,
+    claude_version: str,
     latexmk: str | Sequence[str],
     prompt_template: str,
     schema_path: Path,
     config_digest: str,
-    options: codex_cli.ModelOptions,
+    options: claude_cli.ModelOptions,
     web_search: str = "live",
-    launch_interval: float = codex_cli.CODEX_LAUNCH_INTERVAL_SECONDS,
+    launch_interval: float = claude_cli.AGENT_LAUNCH_INTERVAL_SECONDS,
 ) -> DraftRef:
     manuscript_directory.mkdir(parents=True, exist_ok=True)
     workspace = Path(
@@ -1710,12 +1669,12 @@ def run_author_round(
             ),
             "authors": list(authors),
         }
-        report = codex_cli.run_validated_codex(
-            codex=codex,
+        report = claude_cli.run_validated_agent(
+            claude=claude,
             workspace=workspace,
             prompt=prompt,
             schema_path=schema_path,
-            validator=codex_cli.OutputValidator(
+            validator=claude_cli.OutputValidator(
                 Path(paper_validation.__file__).resolve(),
                 paper_validation.validate,
                 expectations,
@@ -1724,7 +1683,7 @@ def run_author_round(
             web_search=web_search,
             launch_interval=launch_interval,
         )
-        result = codex_cli.validated_result(report)
+        result = claude_cli.validated_result(report)
         generated = [
             path
             for path in report.files
@@ -1747,12 +1706,12 @@ def run_author_round(
             title_hint=title_hint,
             revision_instruction=revision_instruction,
             config_digest=config_digest,
-            codex_version=codex_version,
+            claude_version=claude_version,
             options=options,
             web_search=web_search,
         )
-    except (common.CodexError, OSError) as exc:
-        raise common.CodexError(
+    except (common.AgentError, OSError) as exc:
+        raise common.AgentError(
             common.preserved_workspace_message(exc, workspace)
         ) from exc
     common.cleanup_workspace(workspace, installed_log=draft.directory / "run.log")
@@ -1768,21 +1727,21 @@ def validate_paper_review(
     result = common.read_json(result_path, description="paper-review response")
     verdict = result.get("verdict")
     if verdict not in PAPER_VERDICTS:
-        raise common.CodexError("paper-review response has invalid verdict")
+        raise common.AgentError("paper-review response has invalid verdict")
     if not isinstance(result.get("summary"), str) or not result["summary"].strip():
-        raise common.CodexError("paper-review response has invalid summary")
+        raise common.AgentError("paper-review response has invalid summary")
     _string_list(result, "warnings")
     expected_results = {item.result_id: item for item in inputs}
     reviews = result.get("result_reviews")
     if not isinstance(reviews, list):
-        raise common.CodexError("paper-review response has invalid result_reviews")
+        raise common.AgentError("paper-review response has invalid result_reviews")
     reviewed: set[str] = set()
     for review in reviews:
         if not isinstance(review, dict):
-            raise common.CodexError("paper result review is not an object")
+            raise common.AgentError("paper result review is not an object")
         result_id = review.get("result_id")
         if result_id not in expected_results or result_id in reviewed:
-            raise common.CodexError(
+            raise common.AgentError(
                 f"paper review has invalid or duplicate result {result_id!r}"
             )
         reviewed.add(result_id)
@@ -1792,14 +1751,14 @@ def validate_paper_review(
             "unsupported",
             "incorrect",
         } or not isinstance(review.get("explanation"), str):
-            raise common.CodexError(
+            raise common.AgentError(
                 f"paper review has invalid assessment for {result_id}"
             )
     if reviewed != set(expected_results):
-        raise common.CodexError("paper review omitted selected results")
+        raise common.AgentError("paper review omitted selected results")
     findings = result.get("findings")
     if not isinstance(findings, list):
-        raise common.CodexError("paper-review response has invalid findings")
+        raise common.AgentError("paper-review response has invalid findings")
     finding_ids: set[str] = set()
     all_claims = {
         claim.get("id")
@@ -1809,19 +1768,19 @@ def validate_paper_review(
     }
     for finding in findings:
         if not isinstance(finding, dict):
-            raise common.CodexError("paper-review finding is not an object")
+            raise common.AgentError("paper-review finding is not an object")
         finding_id = finding.get("id")
         if (
             not isinstance(finding_id, str)
             or not FINDING_ID_RE.fullmatch(finding_id)
             or finding_id in finding_ids
         ):
-            raise common.CodexError(
+            raise common.AgentError(
                 f"paper review has invalid or duplicate finding {finding_id!r}"
             )
         finding_ids.add(finding_id)
         if finding.get("severity") not in {"blocking", "major", "minor"}:
-            raise common.CodexError(f"paper finding {finding_id} has invalid severity")
+            raise common.AgentError(f"paper finding {finding_id} has invalid severity")
         if finding.get("category") not in {
             "proof",
             "theorem_statement",
@@ -1833,33 +1792,33 @@ def validate_paper_review(
             "scope",
             "other",
         }:
-            raise common.CodexError(f"paper finding {finding_id} has invalid category")
+            raise common.AgentError(f"paper finding {finding_id} has invalid category")
         result_ids = finding.get("result_ids")
         claim_ids = finding.get("source_claim_ids")
         if not isinstance(result_ids, list) or any(
             result_id not in expected_results for result_id in result_ids
         ):
-            raise common.CodexError(
+            raise common.AgentError(
                 f"paper finding {finding_id} has invalid result_ids"
             )
         if not isinstance(claim_ids, list) or any(
             claim_id not in all_claims for claim_id in claim_ids
         ):
-            raise common.CodexError(
+            raise common.AgentError(
                 f"paper finding {finding_id} has invalid source_claim_ids"
             )
         for field in ("location", "explanation", "suggested_repair"):
             if not isinstance(finding.get(field), str):
-                raise common.CodexError(
+                raise common.AgentError(
                     f"paper finding {finding_id} has invalid {field}"
                 )
         if not isinstance(finding.get("requires_new_research"), bool):
-            raise common.CodexError(
+            raise common.AgentError(
                 f"paper finding {finding_id} has invalid requires_new_research"
             )
     action = result.get("recommended_action")
     if action not in {"revise", "new_research", "human_review"}:
-        raise common.CodexError("paper-review response has invalid recommended_action")
+        raise common.AgentError("paper-review response has invalid recommended_action")
     if verdict == "ready_for_expert_review":
         if action != "human_review" or any(
             finding["severity"] in {"blocking", "major"} for finding in findings
@@ -1867,19 +1826,19 @@ def validate_paper_review(
             review["assessment"] in {"unsupported", "incorrect"}
             for review in reviews
         ):
-            raise common.CodexError(
+            raise common.AgentError(
                 "ready_for_expert_review has an incompatible action, major "
                 "finding, or unsupported result"
             )
     if verdict in REVISION_VERDICTS and (action != "revise" or not findings):
-        raise common.CodexError(
+        raise common.AgentError(
             "revision verdict must recommend revise and identify findings"
         )
     if verdict == "needs_research" and (
         action != "new_research"
         or not any(finding["requires_new_research"] for finding in findings)
     ):
-        raise common.CodexError(
+        raise common.AgentError(
             "needs_research must identify a new-research finding"
         )
     critique = common.validate_markdown(
@@ -1888,7 +1847,7 @@ def validate_paper_review(
     )
     for finding_id in finding_ids:
         if finding_id not in critique:
-            raise common.CodexError(f"paper-critique.md omits {finding_id}")
+            raise common.AgentError(f"paper-critique.md omits {finding_id}")
     return result
 
 
@@ -1897,14 +1856,14 @@ def run_paper_review(
     draft: DraftRef,
     inputs: Sequence[PaperInput],
     *,
-    codex: str,
-    codex_version: str,
+    claude: str,
+    claude_version: str,
     prompt_template: str,
     schema_path: Path,
     config_digest: str,
-    options: codex_cli.ModelOptions,
+    options: claude_cli.ModelOptions,
     web_search: str = "live",
-    launch_interval: float = codex_cli.CODEX_LAUNCH_INTERVAL_SECONDS,
+    launch_interval: float = claude_cli.AGENT_LAUNCH_INTERVAL_SECONDS,
 ) -> PaperReview:
     workspace = Path(
         tempfile.mkdtemp(prefix=".paper-review-run-", dir=manuscript_directory)
@@ -1929,12 +1888,12 @@ def run_paper_review(
                 }
             ),
         }
-        report = codex_cli.run_validated_codex(
-            codex=codex,
+        report = claude_cli.run_validated_agent(
+            claude=claude,
             workspace=workspace,
             prompt=prompt,
             schema_path=schema_path,
-            validator=codex_cli.OutputValidator(
+            validator=claude_cli.OutputValidator(
                 Path(paper_review_validation.__file__).resolve(),
                 paper_review_validation.validate,
                 expectations,
@@ -1943,7 +1902,7 @@ def run_paper_review(
             web_search=web_search,
             launch_interval=launch_interval,
         )
-        result = codex_cli.validated_result(report)
+        result = claude_cli.validated_result(report)
         staging = Path(
             tempfile.mkdtemp(prefix=".paper-review-install-", dir=draft.directory)
         )
@@ -1961,11 +1920,10 @@ def run_paper_review(
                     "draft_digest": _draft_digest(draft),
                     "input_digest": _input_digest(inputs),
                     "config_digest": config_digest,
-                    "codex_version": codex_version,
+                    "claude_version": claude_version,
                     "requested_model": options.model,
                     "requested_reasoning_effort": options.reasoning_effort,
-                    "requested_fast_mode": options.fast,
-                    "requested_service_tier": options.service_tier,
+                    "requested_max_budget_usd": options.max_budget_usd,
                     "requested_web_search": web_search,
                     "verdict": result["verdict"],
                 },
@@ -1985,7 +1943,7 @@ def run_paper_review(
                 os.replace(staging / name, draft.directory / name)
             shutil.rmtree(staging)
         except OSError as exc:
-            raise common.CodexError(
+            raise common.AgentError(
                 f"could not install paper review; staging preserved at {staging}: {exc}"
             ) from exc
         common.report_artifacts(
@@ -1994,8 +1952,8 @@ def run_paper_review(
                 draft.directory / "paper-review.json",
             )
         )
-    except (common.CodexError, OSError) as exc:
-        raise common.CodexError(
+    except (common.AgentError, OSError) as exc:
+        raise common.AgentError(
             common.preserved_workspace_message(exc, workspace)
         ) from exc
     common.cleanup_workspace(
@@ -2015,17 +1973,17 @@ def run_pipeline(
     title_hint: str | None,
     revision_instruction: str | None = None,
     max_rounds: int,
-    codex: str,
-    codex_version: str,
+    claude: str,
+    claude_version: str,
     latexmk: str | Sequence[str],
     prompt_template: str,
     schema_path: Path,
     config_digest: str,
-    options: codex_cli.ModelOptions,
+    options: claude_cli.ModelOptions,
     review_prompt_template: str,
     review_schema_path: Path,
     review_config_digest: str,
-    review_options: codex_cli.ModelOptions,
+    review_options: claude_cli.ModelOptions,
     force_author_round: bool = False,
     web_search: str = "live",
     review_web_search: str = "live",
@@ -2053,8 +2011,8 @@ def run_pipeline(
                 manuscript_directory,
                 current_previous,
                 inputs,
-                codex=codex,
-                codex_version=codex_version,
+                claude=claude,
+                claude_version=claude_version,
                 prompt_template=review_prompt_template,
                 schema_path=review_schema_path,
                 config_digest=review_config_digest,
@@ -2090,8 +2048,8 @@ def run_pipeline(
             authors=authors,
             title_hint=title_hint,
             revision_instruction=revision_instruction,
-            codex=codex,
-            codex_version=codex_version,
+            claude=claude,
+            claude_version=claude_version,
             latexmk=latexmk,
             prompt_template=prompt_template,
             schema_path=schema_path,
@@ -2109,8 +2067,8 @@ def run_pipeline(
             manuscript_directory,
             draft,
             inputs,
-            codex=codex,
-            codex_version=codex_version,
+            claude=claude,
+            claude_version=claude_version,
             prompt_template=review_prompt_template,
             schema_path=review_schema_path,
             config_digest=review_config_digest,
@@ -2130,23 +2088,11 @@ def run_pipeline(
     return PipelineOutcome(tuple(drafts), final_review, "maximum rounds reached")
 
 
-def _inherit_options(
-    primary: codex_cli.ModelOptions,
-    secondary: codex_cli.ModelOptions,
-) -> codex_cli.ModelOptions:
-    return codex_cli.ModelOptions(
-        secondary.model or primary.model,
-        secondary.reasoning_effort or primary.reasoning_effort,
-        secondary.fast or (primary.fast and not secondary.ultrafast),
-        secondary.ultrafast or (primary.ultrafast and not secondary.fast),
-    )
-
-
 def _load_draft(path: Path) -> DraftRef:
     directory = path.expanduser().resolve()
     match = DRAFT_RE.fullmatch(directory.name)
     if not directory.is_dir() or match is None:
-        raise common.CodexError("--revise must name a draft-NNN directory")
+        raise common.AgentError("--revise must name a draft-NNN directory")
     result = common.read_json(
         directory / "paper-result.json",
         description=f"paper result for {directory}",
@@ -2171,7 +2117,7 @@ def _revision_inputs(
         and isinstance(record.get("result_id"), str)
         for record in records
     ):
-        raise common.CodexError("draft manifest has invalid input_attempts")
+        raise common.AgentError("draft manifest has invalid input_attempts")
     selectors = manifest.get("input_selectors")
     if selectors is None:
         selectors = [
@@ -2179,7 +2125,7 @@ def _revision_inputs(
             for record in records
         ]
     if not isinstance(selectors, list):
-        raise common.CodexError("draft manifest has invalid input_selectors")
+        raise common.AgentError("draft manifest has invalid input_selectors")
     attempt_paths, warnings, effective_selectors = resolve_input_selectors(
         selectors,
         refresh_results=refresh_results,
@@ -2187,7 +2133,7 @@ def _revision_inputs(
     preferred_result_ids = {}
     for record in records:
         attempt = _attempt_from_path(
-            _resolve_manifest_path(record["attempt_path"])
+            resolve_manifest_path(record["attempt_path"])
         )
         preferred_result_ids[
             (
@@ -2202,7 +2148,7 @@ def _revision_inputs(
     previous_selection = {
         (
             record["result_id"],
-            str(_resolve_manifest_path(record["attempt_path"])),
+            str(resolve_manifest_path(record["attempt_path"])),
         )
         for record in records
     }
@@ -2301,7 +2247,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "-r",
         "--max-rounds",
-        type=codex_cli.positive_integer,
+        type=claude_cli.positive_integer,
         default=1,
         help=(
             "maximum new author-review rounds in this invocation, including "
@@ -2316,12 +2262,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="validate and report the manuscript plan without starting Codex",
+        help="validate and report the manuscript plan without starting Claude",
     )
     parser.add_argument(
-        "--codex",
-        default="codex",
-        help="Codex CLI executable or command name (default: codex)",
+        "--claude",
+        default="claude",
+        help="Claude Code executable or command name (default: claude)",
     )
     parser.add_argument(
         "--latexmk",
@@ -2335,7 +2281,7 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"writer prompt-template path (default: {DEFAULT_PROMPT_PATH})",
     )
     parser.add_argument("--schema", type=Path, default=DEFAULT_SCHEMA_PATH)
-    codex_cli.add_prompt_arguments(
+    claude_cli.add_prompt_arguments(
         parser,
         default_template=DEFAULT_REVIEW_PROMPT_PATH,
         task="paper critic",
@@ -2346,28 +2292,28 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=DEFAULT_REVIEW_SCHEMA_PATH,
     )
-    codex_cli.add_model_arguments(parser)
-    codex_cli.add_model_arguments(parser, prefix="review")
-    codex_cli.add_web_search_argument(parser, default="live")
-    codex_cli.add_web_search_argument(parser, default="live", prefix="review")
+    claude_cli.add_model_arguments(parser, **claude_cli.stage_model_defaults("write"))
+    claude_cli.add_model_arguments(parser, prefix="review")
+    claude_cli.add_web_search_argument(parser, default="live")
+    claude_cli.add_web_search_argument(parser, default="live", prefix="review")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
-    codex_cli.configure_utf8_stdio()
+    claude_cli.configure_utf8_stdio()
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
         if bool(args.attempts) == bool(args.revise):
-            raise common.CodexError(
+            raise common.AgentError(
                 "provide one or more paper/problem/attempt directories, or "
                 "--revise, but not both"
             )
         if args.revision_instruction is not None:
             if not args.revision_instruction.strip():
-                raise common.CodexError("--prompt must be nonempty")
+                raise common.AgentError("--prompt must be nonempty")
         if args.refresh_results and not args.revise:
-            raise common.CodexError("--refresh-results requires --revise")
+            raise common.AgentError("--refresh-results requires --revise")
         if args.revise:
             previous = _load_draft(args.revise)
             (
@@ -2382,7 +2328,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             manuscript_directory = previous.directory.parent
             if args.name:
-                raise common.CodexError("--name cannot be used with --revise")
+                raise common.AgentError("--name cannot be used with --revise")
             authors = args.authors or prior_manifest.get("authors") or []
             title_hint = (
                 args.title_hint
@@ -2406,22 +2352,22 @@ def main(argv: list[str] | None = None) -> int:
                 for path in manuscript_directory.iterdir()
                 if path.is_dir()
             ):
-                raise common.CodexError(
+                raise common.AgentError(
                     f"manuscript already has drafts: {manuscript_directory}; "
                     "use --revise on a reviewed draft or choose --name"
                 )
             authors = args.authors or []
             title_hint = args.title_hint
         if not all(isinstance(author, str) and author.strip() for author in authors):
-            raise common.CodexError("every --author must be nonempty")
+            raise common.AgentError("every --author must be nonempty")
 
         prompt_path = args.prompt_template.expanduser().resolve()
         schema_path = args.schema.expanduser().resolve()
         prompt_template = _read_text(prompt_path, "paper prompt")
         schema_text = _read_text(schema_path, "paper schema")
         json.loads(schema_text)
-        options = codex_cli.model_options_from_args(args)
-        config_digest = codex_cli.semantic_config_digest(
+        options = claude_cli.model_options_from_args(args)
+        config_digest = claude_cli.semantic_config_digest(
             prompt_template,
             schema_text,
             options,
@@ -2431,7 +2377,7 @@ def main(argv: list[str] | None = None) -> int:
         review_prompt_path = args.review_prompt_template.expanduser().resolve()
         review_schema_path = args.review_schema.expanduser().resolve()
         review_prompt = _read_text(review_prompt_path, "paper-review prompt")
-        review_prompt = codex_cli.with_user_prompt(
+        review_prompt = claude_cli.with_user_prompt(
             review_prompt,
             args.review_prompt,
             task="paper critic",
@@ -2442,12 +2388,12 @@ def main(argv: list[str] | None = None) -> int:
             "paper-review schema",
         )
         json.loads(review_schema_text)
-        review_options = _inherit_options(
+        review_options = claude_cli.inherit_model_options(
             options,
-            codex_cli.model_options_from_args(args, prefix="review"),
+            claude_cli.model_options_from_args(args, prefix="review"),
         )
         review_web_search = args.review_web_search or args.web_search
-        review_config_digest = codex_cli.semantic_config_digest(
+        review_config_digest = claude_cli.semantic_config_digest(
             review_prompt,
             review_schema_text,
             review_options,
@@ -2457,15 +2403,15 @@ def main(argv: list[str] | None = None) -> int:
             ).resolve(),
         )
     except (
-        common.CodexError,
+        common.AgentError,
         OSError,
         UnicodeError,
         json.JSONDecodeError,
     ) as exc:
-        return codex_cli.report_error(parser, exc)
+        return claude_cli.report_error(parser, exc)
 
     if args.dry_run:
-        codex_cli.report_codex_home_warnings()
+        claude_cli.report_agent_config_warnings()
         print(f"Would write one manuscript: {manuscript_directory}")
         if selection_changed:
             print("  result selection changed; an author round will run first")
@@ -2487,8 +2433,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     try:
-        codex = codex_cli.resolve_codex_executable(args.codex)
-        codex_version = codex_cli.read_codex_version(codex)
+        claude = claude_cli.resolve_agent_executable(args.claude)
+        claude_version = claude_cli.read_agent_version(claude)
         latexmk = resolve_latexmk(args.latexmk)
         manuscript_directory.mkdir(parents=True, exist_ok=True)
         print(
@@ -2521,8 +2467,8 @@ def main(argv: list[str] | None = None) -> int:
             title_hint=title_hint,
             revision_instruction=args.revision_instruction,
             max_rounds=args.max_rounds,
-            codex=codex,
-            codex_version=codex_version,
+            claude=claude,
+            claude_version=claude_version,
             latexmk=latexmk,
             prompt_template=prompt_template,
             schema_path=schema_path,
@@ -2536,7 +2482,7 @@ def main(argv: list[str] | None = None) -> int:
             web_search=args.web_search,
             review_web_search=review_web_search,
         )
-    except (common.CodexError, OSError) as exc:
+    except (common.AgentError, OSError) as exc:
         print(f"Paper writing failed: {exc}", file=sys.stderr)
         return 1
 

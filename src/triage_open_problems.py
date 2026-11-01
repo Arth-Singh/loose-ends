@@ -15,7 +15,7 @@ import tempfile
 from typing import Sequence
 
 import analyze_papers
-import codex_cli
+import claude_cli
 import open_problem_common as common
 from validation import triage as triage_validation
 
@@ -60,7 +60,7 @@ def render_prompt(
         )
         .replace(
             "{{CONTEXT_DIRECTORY}}",
-            codex_cli.path_for_codex(context_directory),
+            str(context_directory),
         )
     )
 
@@ -128,39 +128,39 @@ def validate_triage_result(
     """Validate and repair a pre-checker triage workspace for recovery."""
     result = common.read_json(result_path, description="triage response")
     if result.get("status") not in {"complete", "partial"}:
-        raise common.CodexError("triage response has an invalid status")
+        raise common.AgentError("triage response has an invalid status")
     warnings = result.get("warnings")
     if not isinstance(warnings, list) or not all(
         isinstance(item, str) for item in warnings
     ):
-        raise common.CodexError("triage response has invalid warnings")
+        raise common.AgentError("triage response has invalid warnings")
     entries = result.get("triages")
     if not isinstance(entries, list):
-        raise common.CodexError("triage response has no triages array")
+        raise common.AgentError("triage response has no triages array")
     requested = {problem.id for problem in problems}
     by_id: dict[str, dict] = {}
     synthesized_reports: list[str] = []
     for entry in entries:
         if not isinstance(entry, dict):
-            raise common.CodexError("a triage entry is not an object")
+            raise common.AgentError("a triage entry is not an object")
         problem_id = entry.get("problem_id")
         if problem_id not in requested:
-            raise common.CodexError(
+            raise common.AgentError(
                 f"triage response contains unrequested problem {problem_id!r}"
             )
         if problem_id in by_id:
-            raise common.CodexError(
+            raise common.AgentError(
                 f"triage response duplicates problem {problem_id}"
             )
         classification = entry.get("classification")
         if classification not in TRIAGE_CLASSES:
-            raise common.CodexError(
+            raise common.AgentError(
                 f"triage response has invalid classification for {problem_id}"
             )
         if not isinstance(entry.get("rationale"), str) or not entry[
             "rationale"
         ].strip():
-            raise common.CodexError(
+            raise common.AgentError(
                 f"triage response has no rationale for {problem_id}"
             )
         for field in ("promising_features", "obstacles"):
@@ -168,19 +168,19 @@ def validate_triage_result(
             if not isinstance(values, list) or not all(
                 isinstance(value, str) for value in values
             ):
-                raise common.CodexError(
+                raise common.AgentError(
                     f"triage response has invalid {field} for {problem_id}"
                 )
         suggestions = entry.get("suggested_approaches")
         if not isinstance(suggestions, list):
-            raise common.CodexError(
+            raise common.AgentError(
                 f"triage response has invalid suggested_approaches for "
                 f"{problem_id}"
             )
         suggestion_ids: set[str] = set()
         for suggestion in suggestions:
             if not isinstance(suggestion, dict):
-                raise common.CodexError(
+                raise common.AgentError(
                     f"a suggested approach for {problem_id} is not an object"
                 )
             suggestion_id = suggestion.get("id")
@@ -189,13 +189,13 @@ def validate_triage_result(
                 or not suggestion_id.strip()
                 or suggestion_id in suggestion_ids
             ):
-                raise common.CodexError(
+                raise common.AgentError(
                     f"invalid or duplicate suggested-approach ID for "
                     f"{problem_id}"
                 )
             suggestion_ids.add(suggestion_id)
             if suggestion.get("mode") not in APPROACH_MODES:
-                raise common.CodexError(
+                raise common.AgentError(
                     f"invalid mode for {problem_id} suggested approach "
                     f"{suggestion_id}"
                 )
@@ -204,7 +204,7 @@ def validate_triage_result(
                     not isinstance(suggestion.get(field), str)
                     or not suggestion[field].strip()
                 ):
-                    raise common.CodexError(
+                    raise common.AgentError(
                         f"{problem_id} suggested approach {suggestion_id} "
                         f"has no {field}"
                     )
@@ -216,8 +216,8 @@ def validate_triage_result(
                     encoding="utf-8",
                 )
             except OSError as exc:
-                raise common.CodexError(
-                    f"Codex did not create triage report for {problem_id}, "
+                raise common.AgentError(
+                    f"Claude did not create triage report for {problem_id}, "
                     f"and the driver could not synthesize it: {exc}"
                 ) from exc
             synthesized_reports.append(problem_id)
@@ -226,13 +226,13 @@ def validate_triage_result(
             description=f"triage report for {problem_id}",
         )
         if problem_id not in contents:
-            raise common.CodexError(
+            raise common.AgentError(
                 f"triage report does not mention {problem_id}"
             )
         by_id[problem_id] = entry
     missing = requested.difference(by_id)
     if missing:
-        raise common.CodexError(
+        raise common.AgentError(
             "triage response omitted: " + ", ".join(sorted(missing))
         )
     if synthesized_reports:
@@ -256,8 +256,8 @@ def _install_triage(
     entry: dict,
     input_digest: str,
     config_digest: str,
-    codex_version: str,
-    options: codex_cli.ModelOptions,
+    claude_version: str,
+    options: claude_cli.ModelOptions,
 ) -> None:
     problem.directory.mkdir(parents=True, exist_ok=True)
     staging = Path(
@@ -286,11 +286,10 @@ def _install_triage(
                 problem.paper_directory
             ),
             "attempt_history_digest": common.attempt_history_digest(problem),
-            "codex_version": codex_version,
+            "claude_version": claude_version,
             "requested_model": options.model,
             "requested_reasoning_effort": options.reasoning_effort,
-            "requested_fast_mode": options.fast,
-            "requested_service_tier": options.service_tier,
+            "requested_max_budget_usd": options.max_budget_usd,
             "classification": entry["classification"],
             "suggestion_count": len(entry["suggested_approaches"]),
         }
@@ -311,7 +310,7 @@ def _install_triage(
         ):
             os.replace(staging / name, problem.directory / name)
     except OSError as exc:
-        raise common.CodexError(
+        raise common.AgentError(
             f"could not install triage for {problem.id}; staging preserved "
             f"at {staging}: {exc}"
         ) from exc
@@ -325,15 +324,15 @@ def _install_triage(
 def triage_paper(
     problems: Sequence[common.ProblemRef],
     *,
-    codex: str,
-    codex_version: str,
+    claude: str,
+    claude_version: str,
     prompt_template: str,
     schema_path: Path,
     config_digest: str,
-    options: codex_cli.ModelOptions,
-    launch_interval: float = codex_cli.CODEX_LAUNCH_INTERVAL_SECONDS,
+    options: claude_cli.ModelOptions,
+    launch_interval: float = claude_cli.AGENT_LAUNCH_INTERVAL_SECONDS,
 ) -> list[TriageOutcome]:
-    """Triage the selected stale problems from one paper in one Codex run."""
+    """Triage the selected stale problems from one paper in one Claude run."""
     if not problems:
         return []
     paper = problems[0].paper_directory
@@ -359,12 +358,12 @@ def triage_paper(
             context_directory=context,
         )
         expectations = {"problem_ids": [problem.id for problem in problems]}
-        report = codex_cli.run_validated_codex(
-            codex=codex,
+        report = claude_cli.run_validated_agent(
+            claude=claude,
             workspace=workspace,
             prompt=prompt,
             schema_path=schema_path,
-            validator=codex_cli.OutputValidator(
+            validator=claude_cli.OutputValidator(
                 Path(triage_validation.__file__).resolve(),
                 triage_validation.validate,
                 expectations,
@@ -372,7 +371,7 @@ def triage_paper(
             options=options,
             launch_interval=launch_interval,
         )
-        root_result = codex_cli.validated_result(report)
+        root_result = claude_cli.validated_result(report)
         entries = {entry["problem_id"]: entry for entry in root_result["triages"]}
         outcomes: list[TriageOutcome] = []
         for problem in problems:
@@ -384,7 +383,7 @@ def triage_paper(
                 entry=entry,
                 input_digest=input_digests[problem.id],
                 config_digest=config_digest,
-                codex_version=codex_version,
+                claude_version=claude_version,
                 options=options,
             )
             outcomes.append(
@@ -398,8 +397,8 @@ def triage_paper(
                     "approach(es)",
                 )
             )
-    except (common.CodexError, OSError) as exc:
-        raise common.CodexError(
+    except (common.AgentError, OSError) as exc:
+        raise common.AgentError(
             common.preserved_workspace_message(exc, workspace)
         ) from exc
     warning = common.cleanup_workspace(
@@ -467,9 +466,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "-j",
         "--jobs",
-        type=codex_cli.positive_integer,
+        type=claude_cli.positive_integer,
         default=1,
-        help="maximum concurrent per-paper Codex runs (default: 1)",
+        help="maximum concurrent per-paper Claude runs (default: 1)",
     )
     parser.add_argument(
         "-f",
@@ -480,7 +479,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="report what would be triaged without starting Codex",
+        help="report what would be triaged without starting Claude",
     )
     parser.add_argument(
         "--solve",
@@ -500,11 +499,11 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
-        "--codex",
-        default="codex",
-        help="Codex CLI executable or command name (default: codex)",
+        "--claude",
+        default="claude",
+        help="Claude Code executable or command name (default: claude)",
     )
-    codex_cli.add_prompt_arguments(
+    claude_cli.add_prompt_arguments(
         parser,
         default_template=DEFAULT_PROMPT_PATH,
         task="triage agent",
@@ -515,18 +514,18 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_SCHEMA_PATH,
         help=f"agent-result JSON schema (default: {DEFAULT_SCHEMA_PATH})",
     )
-    codex_cli.add_model_arguments(parser)
+    claude_cli.add_model_arguments(parser, **claude_cli.stage_model_defaults("triage"))
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
-    codex_cli.configure_utf8_stdio()
+    claude_cli.configure_utf8_stdio()
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
         input_paths, direct_exact = common.direct_problem_inputs(args.paths)
         if direct_exact and args.problem_ids:
-            raise common.CodexError(
+            raise common.AgentError(
                 "direct problem paths cannot be combined with --problem"
             )
         explicitness = common.parse_csv_values(
@@ -537,12 +536,6 @@ def main(argv: list[str] | None = None) -> int:
         paper_directories = analyze_papers.discover_paper_directories(
             input_paths
         )
-        repaired_codex, repaired_directory_count = (
-            common.repair_problem_data_access(
-                paper_directories,
-                codex_command=args.codex,
-            )
-        )
         problems = common.discover_problem_refs(
             paper_directories,
             problem_ids=set(args.problem_ids) if args.problem_ids else None,
@@ -552,15 +545,15 @@ def main(argv: list[str] | None = None) -> int:
         prompt_path = args.prompt_template.expanduser().resolve()
         schema_path = args.schema.expanduser().resolve()
         prompt_template = prompt_path.read_text(encoding="utf-8")
-        prompt_template = codex_cli.with_user_prompt(
+        prompt_template = claude_cli.with_user_prompt(
             prompt_template,
             args.prompt,
             task="triage agent",
         )
         schema_text = schema_path.read_text(encoding="utf-8")
         json.loads(schema_text)
-        options = codex_cli.model_options_from_args(args)
-        config_digest = codex_cli.semantic_config_digest(
+        options = claude_cli.model_options_from_args(args)
+        config_digest = claude_cli.semantic_config_digest(
             prompt_template,
             schema_text,
             options,
@@ -573,23 +566,12 @@ def main(argv: list[str] | None = None) -> int:
                 label="--solve",
             )
     except (
-        common.CodexError,
+        common.AgentError,
         OSError,
         UnicodeError,
         json.JSONDecodeError,
     ) as exc:
-        return codex_cli.report_error(parser, exc)
-
-    if repaired_directory_count:
-        noun = (
-            "directory"
-            if repaired_directory_count == 1
-            else "directories"
-        )
-        print(
-            f"Repaired Windows access for {repaired_directory_count} "
-            f"generated-data {noun}."
-        )
+        return claude_cli.report_error(parser, exc)
 
     current: list[TriageOutcome] = []
     stale: list[common.ProblemRef] = []
@@ -614,7 +596,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.dry_run:
         if stale:
-            codex_cli.report_codex_home_warnings()
+            claude_cli.report_agent_config_warnings()
         for problem in stale:
             print(
                 f"Would triage: {problem.paper_directory} {problem.id}: "
@@ -628,16 +610,13 @@ def main(argv: list[str] | None = None) -> int:
 
     if stale:
         try:
-            codex = (
-                repaired_codex
-                or codex_cli.resolve_codex_executable(args.codex)
-            )
-            codex_version = codex_cli.read_codex_version(codex)
-        except common.CodexError as exc:
-            return codex_cli.report_error(parser, exc)
+            claude = claude_cli.resolve_agent_executable(args.claude)
+            claude_version = claude_cli.read_agent_version(claude)
+        except common.AgentError as exc:
+            return claude_cli.report_error(parser, exc)
     else:
-        codex = repaired_codex or args.codex
-        codex_version = "not queried"
+        claude = args.claude
+        claude_version = "not queried"
 
     outcomes = list(current)
     failures: list[tuple[Path, str]] = []
@@ -646,7 +625,7 @@ def main(argv: list[str] | None = None) -> int:
         print(
             f"Triaging {len(stale)} stale problem(s) from "
             f"{len(grouped)} paper(s), with up to "
-            f"{min(args.jobs, len(grouped))} Codex agent(s) at once."
+            f"{min(args.jobs, len(grouped))} Claude agent(s) at once."
         )
         with ThreadPoolExecutor(
             max_workers=min(args.jobs, len(grouped))
@@ -655,8 +634,8 @@ def main(argv: list[str] | None = None) -> int:
                 executor.submit(
                     triage_paper,
                     paper_problems,
-                    codex=codex,
-                    codex_version=codex_version,
+                    claude=claude,
+                    claude_version=claude_version,
                     prompt_template=prompt_template,
                     schema_path=schema_path,
                     config_digest=config_digest,
@@ -668,7 +647,7 @@ def main(argv: list[str] | None = None) -> int:
                 paper = future_to_paper[future]
                 try:
                     paper_outcomes = future.result()
-                except (common.CodexError, OSError) as exc:
+                except (common.AgentError, OSError) as exc:
                     failures.append((paper, str(exc)))
                     print(f"Failed: {paper}: {exc}", file=sys.stderr)
                     continue
@@ -715,8 +694,8 @@ def main(argv: list[str] | None = None) -> int:
             args.solve_review,
             "--jobs",
             str(args.jobs),
-            "--codex",
-            args.codex,
+            "--claude",
+            args.claude,
         ]
         for problem in selected:
             solver_arguments.extend(
@@ -725,16 +704,18 @@ def main(argv: list[str] | None = None) -> int:
                     f"{problem.paper_directory}::{problem.id}",
                 )
             )
-        if options.model is not None:
+        # Forward only explicit choices: triage defaults to a cheaper model
+        # than the solver, whose own defaults must otherwise apply.
+        if options.model != parser.get_default("model"):
             solver_arguments.extend(("--model", options.model))
-        if options.reasoning_effort is not None:
+        if options.reasoning_effort != parser.get_default("reasoning_effort"):
             solver_arguments.extend(
                 ("--reasoning-effort", options.reasoning_effort)
             )
-        if options.fast:
-            solver_arguments.append("--fast")
-        if options.ultrafast:
-            solver_arguments.append("--ultrafast")
+        if options.max_budget_usd is not None:
+            solver_arguments.extend(
+                ("--max-budget-usd", f"{options.max_budget_usd:g}")
+            )
         print(
             f"Feeding {len(selected)} current triage item(s) into the solver."
         )

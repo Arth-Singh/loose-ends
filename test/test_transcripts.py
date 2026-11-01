@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 import support
 
 support.use_resolved_temp_root()
-from codex_transcripts import record_transcript, transcript_stage, TRANSCRIPT_ENV
+from transcripts import record_transcript, transcript_stage, TRANSCRIPT_ENV
 from workbench import WorkbenchHandler
 
 
@@ -52,11 +52,11 @@ class TranscriptTests(unittest.TestCase):
                 (workspace / "run.log").write_text("failure", encoding="utf-8")
                 raise RuntimeError("failed")
 
-            with patch.dict(os.environ, {TRANSCRIPT_ENV: str(root / "codex")}):
+            with patch.dict(os.environ, {TRANSCRIPT_ENV: str(root / "transcripts")}):
                 with self.assertRaisesRegex(RuntimeError, "failed"):
                     invoke(workspace=workspace, prompt="Do the task")
             (workspace / "events.jsonl").unlink()
-            folder = next((root / "codex").iterdir())
+            folder = next((root / "transcripts").iterdir())
             self.assertEqual((folder / "events").read_text(encoding="utf-8"), '工具\n')
             self.assertEqual((folder / "prompt.txt").read_text(), "Do the task")
             self.assertEqual(json.loads((folder / "source.json").read_text())["stage"], "Review")
@@ -64,8 +64,8 @@ class TranscriptTests(unittest.TestCase):
             self.assertGreaterEqual(timing["elapsed_seconds"], 0)
             self.assertGreaterEqual(timing["finished_at"], timing["started_at"])
             handler = self.handler(root, {"log_path": str(root / "console.log"), "status": "failed"})
-            handler._send_codex("id", "")
-            self.assertEqual(handler.result["transcripts"][0]["label"], "Codex 1 · Review")
+            handler._send_transcript("id", "")
+            self.assertEqual(handler.result["transcripts"][0]["label"], "Claude 1 · Review")
 
     def test_elapsed_uses_monotonic_time_and_preserves_return_value(self):
         with TemporaryDirectory() as temporary:
@@ -73,14 +73,14 @@ class TranscriptTests(unittest.TestCase):
 
             @record_transcript
             def invoke(**kwargs):
-                (root / "events.jsonl").write_text('{"type":"turn.completed"}\n')
+                (root / "events.jsonl").write_text('{"type":"result"}\n')
                 return "result"
 
-            with patch.dict(os.environ, {TRANSCRIPT_ENV: str(root / "codex")}), \
-                 patch("codex_transcripts.time.time", side_effect=[100, 200]), \
-                 patch("codex_transcripts.time.monotonic", side_effect=[10, 15]):
+            with patch.dict(os.environ, {TRANSCRIPT_ENV: str(root / "transcripts")}), \
+                 patch("transcripts.time.time", side_effect=[100, 200]), \
+                 patch("transcripts.time.monotonic", side_effect=[10, 15]):
                 self.assertEqual(invoke(workspace=root, prompt="p"), "result")
-            folder = next((root / "codex").iterdir())
+            folder = next((root / "transcripts").iterdir())
             timing = json.loads((folder / "source.json").read_text())
             self.assertEqual((timing["started_at"], timing["finished_at"], timing["elapsed_seconds"]), (100, 200, 5))
 
@@ -101,19 +101,19 @@ class TranscriptTests(unittest.TestCase):
             run = {"log_path": str(root / "managed" / "console.log"),
                    "status": "running", "outputs": [str(root / "attempt.md")]}
             handler = self.handler(root, run)
-            handler._send_codex("id", "index=0")
+            handler._send_transcript("id", "index=0")
             self.assertEqual(handler.result["text"].encode(), first)
             self.assertFalse(handler.result["complete"])
-            handler._send_codex("id", f"index=0&offset={len(first)}")
+            handler._send_transcript("id", f"index=0&offset={len(first)}")
             self.assertEqual(handler.result["text"], "")
             with events.open("ab") as output:
-                output.write(b'"turn.completed"}\n')
+                output.write(b'"result"}\n')
             run["status"] = "succeeded"
-            handler._send_codex("id", "index=0")
+            handler._send_transcript("id", "index=0")
             self.assertFalse(handler.result["complete"])
-            handler._send_codex("id", f"index=0&offset={len(first)}")
+            handler._send_transcript("id", f"index=0&offset={len(first)}")
             self.assertTrue(handler.result["complete"])
-            self.assertEqual(json.loads(handler.result["text"])["type"], "turn.completed")
+            self.assertEqual(json.loads(handler.result["text"])["type"], "result")
 
     def test_report_transcripts_only_include_selected_attempt_and_problem_logs(self):
         with TemporaryDirectory() as temporary:
@@ -128,20 +128,20 @@ class TranscriptTests(unittest.TestCase):
                 (attempt, "repair-events.jsonl"), (other, "events.jsonl"),
                 (problem, "triage-events.jsonl"), (problem, "literature-events.jsonl"),
             ):
-                (directory / name).write_text('{"type":"turn.completed"}\n', encoding="utf-8")
+                (directory / name).write_text('{"type":"result"}\n', encoding="utf-8")
             handler = self.handler(root, {})
             handler.app.catalog = SimpleNamespace(review_detail=lambda key: {
                 "attemptDirectory": str(attempt), "paperDirectory": str(root), "problemId": "OP-001",
             })
-            handler._send_review_codex("key=selected")
+            handler._send_review_transcript("key=selected")
             entries = handler.result["transcripts"]
             self.assertEqual([entry["label"] for entry in entries], [
-                "Codex 1 · Solve", "Codex 2 · Review", "Codex 3 · Literature review", "Codex 4 · Triage",
+                "Claude 1 · Solve", "Claude 2 · Review", "Claude 3 · Literature review", "Claude 4 · Triage",
             ])
-            handler._send_review_codex(urlencode({"key": "selected", "id": entries[0]["id"]}))
-            self.assertEqual(json.loads(handler.result["text"])["type"], "turn.completed")
-            with self.assertRaisesRegex(Exception, "unknown Codex transcript"):
-                handler._send_review_codex(urlencode({"key": "selected", "id": str(other / "events.jsonl")}))
+            handler._send_review_transcript(urlencode({"key": "selected", "id": entries[0]["id"]}))
+            self.assertEqual(json.loads(handler.result["text"])["type"], "result")
+            with self.assertRaisesRegex(Exception, "unknown Claude transcript"):
+                handler._send_review_transcript(urlencode({"key": "selected", "id": str(other / "events.jsonl")}))
 
     def test_catalog_transcripts_scope_paper_analysis_and_selected_draft(self):
         with TemporaryDirectory() as temporary:
@@ -162,17 +162,17 @@ class TranscriptTests(unittest.TestCase):
                     {"key": "draft2", "path": str(other)},
                 ]}],
             })
-            handler._send_catalog_codex("category=paper&key=paper")
-            self.assertEqual([entry["label"] for entry in handler.result["transcripts"]], ["Codex 1 · Analyze"])
-            handler._send_catalog_codex("category=draft&key=draft1")
+            handler._send_catalog_transcript("category=paper&key=paper")
+            self.assertEqual([entry["label"] for entry in handler.result["transcripts"]], ["Claude 1 · Analyze"])
+            handler._send_catalog_transcript("category=draft&key=draft1")
             entries = handler.result["transcripts"]
-            self.assertEqual([entry["label"] for entry in entries], ["Codex 1 · Write", "Codex 2 · Paper review"])
-            handler._send_catalog_codex(urlencode({"category": "draft", "key": "draft1", "id": entries[0]["id"]}))
+            self.assertEqual([entry["label"] for entry in entries], ["Claude 1 · Write", "Claude 2 · Paper review"])
+            handler._send_catalog_transcript(urlencode({"category": "draft", "key": "draft1", "id": entries[0]["id"]}))
             self.assertEqual(json.loads(handler.result["text"]), {})
             with self.assertRaises(KeyError):
-                handler._send_catalog_codex("category=draft&key=missing")
-            with self.assertRaisesRegex(Exception, "unknown Codex transcript"):
-                handler._send_catalog_codex(urlencode({"category": "draft", "key": "draft1", "id": str(other / "events.jsonl")}))
+                handler._send_catalog_transcript("category=draft&key=missing")
+            with self.assertRaisesRegex(Exception, "unknown Claude transcript"):
+                handler._send_catalog_transcript(urlencode({"category": "draft", "key": "draft1", "id": str(other / "events.jsonl")}))
 
 
 if __name__ == "__main__":

@@ -11,7 +11,7 @@ import hashlib
 import ipaddress
 import json
 import logging
-from codex_transcripts import artifact_transcripts, transcript_stage
+from transcripts import RUN_TRANSCRIPT_DIRECTORY, artifact_transcripts, transcript_stage
 import mimetypes
 import os
 from pathlib import Path, PurePosixPath
@@ -31,7 +31,7 @@ import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import analyze_papers
-import codex_cli
+import claude_cli
 import download_arxiv
 import download_arxiv_author
 import human_review
@@ -261,22 +261,27 @@ def _catalog_implementation_signature() -> str:
 
 
 def _catalog_root_signature(root: Path) -> str:
-    """Fingerprint catalog-relevant filesystem state without parsing it."""
+    """Fingerprint catalog-relevant filesystem state without parsing it.
+
+    This runs on every catalog refresh, so it works on path strings: building
+    a Path and calling relative_to per entry was half of a warm refresh.
+    """
     digest = hashlib.sha256()
     if not root.is_dir():
         return digest.hexdigest()
-    for directory, child_names, file_names in os.walk(root):
+    root_text = os.fspath(root)
+    for directory, child_names, file_names in os.walk(root_text):
         child_names[:] = sorted(
             name for name in child_names
             if name not in IGNORED_PARTS
             and not name.startswith(IGNORED_PREFIXES)
         )
-        current = Path(directory)
+        relative_directory = directory[len(root_text) + 1:]
+        prefix = relative_directory.replace(os.sep, "/") + "/" if relative_directory else ""
         for name in child_names:
-            relative = (current / name).relative_to(root).as_posix()
-            digest.update(f"D\0{relative}\0".encode("utf-8", errors="surrogateescape"))
+            digest.update(f"D\0{prefix}{name}\0".encode("utf-8", errors="surrogateescape"))
         relative_parts = {
-            part.casefold() for part in current.relative_to(root).parts
+            part.casefold() for part in relative_directory.split(os.sep) if part
         }
         include_directory_files = bool(
             relative_parts.intersection({"artifacts", "figures", "code"})
@@ -287,14 +292,12 @@ def _catalog_root_signature(root: Path) -> str:
                 and not include_directory_files
             ):
                 continue
-            path = current / name
             try:
-                status = path.stat()
+                status = os.stat(os.path.join(directory, name))
             except OSError:
                 continue
-            relative = path.relative_to(root).as_posix()
             digest.update(
-                f"F\0{relative}\0{status.st_mtime_ns}\0{status.st_size}\0".encode(
+                f"F\0{prefix}{name}\0{status.st_mtime_ns}\0{status.st_size}\0".encode(
                     "utf-8", errors="surrogateescape"
                 )
             )
@@ -308,7 +311,7 @@ def _review_inventory(
 ) -> list[dict]:
     try:
         problems = common.discover_problem_refs(paths)
-    except common.CodexError as exc:
+    except common.AgentError as exc:
         if any(
             message in str(exc)
             for message in (
@@ -1017,7 +1020,7 @@ class CatalogManager:
                 manuscripts,
                 loading=False,
             )
-        except (OSError, UnicodeError, common.CodexError, json.JSONDecodeError) as exc:
+        except (OSError, UnicodeError, common.AgentError, json.JSONDecodeError) as exc:
             with self.lock:
                 self.error = str(exc)
                 self.catalog["error"] = self.error
@@ -1320,8 +1323,8 @@ class Scheduler:
             run["id"],
         ]
         environment = os.environ.copy()
-        environment["LOOSE_ENDS_CODEX_LAUNCH_GATE"] = str(
-            self.state_directory / "codex-launch.lock"
+        environment["LOOSE_ENDS_AGENT_LAUNCH_GATE"] = str(
+            self.state_directory / "claude-launch.lock"
         )
         memory = getattr(self, "memory", None)
         try:
@@ -1348,7 +1351,7 @@ class Scheduler:
             "stdout": subprocess.DEVNULL,
             "stderr": subprocess.DEVNULL,
         }
-        options.update(codex_cli.windowless_popen_options())
+        options.update(claude_cli.popen_session_options())
         try:
             subprocess.Popen(command, **options)
         except OSError as exc:
@@ -1911,7 +1914,7 @@ class WorkbenchApplication:
                     manifest_path,
                     description="paper analysis manifest",
                 )
-            except common.CodexError as exc:
+            except common.AgentError as exc:
                 raise PlanError(
                     "analyze the paper before adding an open problem"
                 ) from exc
@@ -1966,7 +1969,7 @@ class WorkbenchApplication:
             catalog_pending = False
             try:
                 self.catalog.publish_paper(paper)
-            except (OSError, UnicodeError, common.CodexError, json.JSONDecodeError):
+            except (OSError, UnicodeError, common.AgentError, json.JSONDecodeError):
                 # The edit is already saved. Reporting a failed save here
                 # would encourage a retry that creates a second problem.
                 catalog_pending = True
@@ -2008,7 +2011,7 @@ class WorkbenchApplication:
                     draft / "manifest.json",
                     description=f"draft manifest for {draft}",
                 )
-        except common.CodexError as exc:
+        except common.AgentError as exc:
             raise PlanError(str(exc)) from exc
         catalog = self.catalog.snapshot()
         result["sources"] = _manuscript_sources(
@@ -2252,18 +2255,18 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
             elif path == "/api/review-detail":
                 key = parse_qs(parsed.query).get("key", [""])[0]
                 self.send_json(self.app.catalog.review_detail(key))
-            elif path == "/api/review-codex":
-                self._send_review_codex(parsed.query)
-            elif path == "/api/catalog-codex":
-                self._send_catalog_codex(parsed.query)
+            elif path == "/api/review-transcript":
+                self._send_review_transcript(parsed.query)
+            elif path == "/api/catalog-transcript":
+                self._send_catalog_transcript(parsed.query)
             elif path == "/api/jobs":
                 self.send_json({"jobs": self.app.store.list_jobs()})
             elif match := re.fullmatch(r"/api/jobs/([0-9a-f-]+)", path):
                 self.send_json(self.app.store.get_job(match.group(1)))
             elif match := re.fullmatch(r"/api/runs/([0-9a-f-]+)/log", path):
                 self._send_log(match.group(1), parsed.query)
-            elif match := re.fullmatch(r"/api/runs/([0-9a-f-]+)/codex", path):
-                self._send_codex(match.group(1), parsed.query)
+            elif match := re.fullmatch(r"/api/runs/([0-9a-f-]+)/transcript", path):
+                self._send_transcript(match.group(1), parsed.query)
             elif path == "/api/events":
                 self._send_events(parsed.query)
             elif path == "/api/file":
@@ -2538,9 +2541,9 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
             while chunk := temporary.read(1024 * 1024):
                 self.wfile.write(chunk)
 
-    def _send_codex(self, run_id: str, query: str) -> None:
+    def _send_transcript(self, run_id: str, query: str) -> None:
         run = self.app.store.get_run(run_id)
-        root = Path(run["log_path"]).parent / "codex"
+        root = Path(run["log_path"]).parent / RUN_TRANSCRIPT_DIRECTORY
         transcripts = []
         stages = {}
         for folder in sorted(root.glob("turn-*")):
@@ -2565,16 +2568,16 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
             roots=[root, *self.app.allowed_roots],
         )
 
-    def _send_review_codex(self, query: str) -> None:
+    def _send_review_transcript(self, query: str) -> None:
         key = parse_qs(query).get("key", [""])[0]
         item = self.app.catalog.review_detail(key)
         directories = []
         if item.get("attemptDirectory"):
             directories.append(Path(item["attemptDirectory"]))
         directories.append(Path(item["paperDirectory"]) / item["problemId"])
-        self._send_saved_codex(directories, query)
+        self._send_saved_transcript(directories, query)
 
-    def _send_catalog_codex(self, query: str) -> None:
+    def _send_catalog_transcript(self, query: str) -> None:
         values = parse_qs(query)
         key = values.get("key", [""])[0]
         kind = values.get("category", [""])[0]
@@ -2593,9 +2596,9 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
             directory = Path(item["path"])
         if kind == "paper":
             directory /= "analysis"
-        self._send_saved_codex([directory], query)
+        self._send_saved_transcript([directory], query)
 
-    def _send_saved_codex(self, directories, query: str) -> None:
+    def _send_saved_transcript(self, directories, query: str) -> None:
         if any(not _is_allowed_file(path, self.app.allowed_roots) for path in directories):
             raise PlanError("transcript is outside allowed roots")
         transcripts, stages = artifact_transcripts(directories)
@@ -2609,7 +2612,7 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
         if "index" not in values and "id" not in values:
             self.send_json({"complete": complete, "transcripts": [
                 {"index": index, "id": key,
-                 "label": f"Codex {index + 1}" + (f" · {stages[key]}" if stages.get(key) else ""),
+                 "label": f"Claude {index + 1}" + (f" · {stages[key]}" if stages.get(key) else ""),
                  "legacy": "prompt" not in files}
                 for index, (key, files) in enumerate(transcripts)
             ]})
@@ -2624,7 +2627,7 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
                 raise ValueError()
             _, files = transcripts[index]
         except (ValueError, IndexError):
-            raise PlanError("unknown Codex transcript")
+            raise PlanError("unknown Claude transcript")
         kind = values.get("kind", ["events"])[0]
         if kind not in files:
             raise PlanError("unknown transcript file")
@@ -2775,11 +2778,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    codex_cli.configure_utf8_stdio()
+    claude_cli.configure_utf8_stdio()
     parser = build_parser()
     args = parser.parse_args(argv)
     if Observer is None:
-        return codex_cli.report_error(
+        return claude_cli.report_error(
             parser,
             PlanError(
                 "watchdog is required; run python -m pip install -r requirements.txt"
@@ -2800,8 +2803,8 @@ def main(argv: list[str] | None = None) -> int:
             app,
             allowed_hostnames=args.allowed_host,
         )
-    except (OSError, common.CodexError) as exc:
-        return codex_cli.report_error(parser, exc)
+    except (OSError, common.AgentError) as exc:
+        return claude_cli.report_error(parser, exc)
     host, port = server.server_address[:2]
     url_host = "localhost" if host in LOOPBACK_HOSTS | WILDCARD_HOSTS else host
     if ":" in url_host and not url_host.startswith("["):

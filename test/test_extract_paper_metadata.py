@@ -13,16 +13,17 @@ import support
 
 support.use_resolved_temp_root()
 
-import codex_cli
+import claude_cli
 import extract_paper_metadata
 
 
 class ExtractPaperMetadataTests(unittest.TestCase):
-    def test_cli_defaults_to_medium_reasoning(self):
+    def test_cli_defaults_to_a_small_model_at_low_effort(self):
         args = extract_paper_metadata.build_parser().parse_args(["paper"])
-        self.assertEqual(args.reasoning_effort, "medium")
+        self.assertEqual(args.model, "claude-haiku-5-5")
+        self.assertEqual(args.reasoning_effort, "low")
 
-    def test_dry_run_needs_no_codex_executable(self):
+    def test_dry_run_needs_no_claude_executable(self):
         with TemporaryDirectory() as temporary:
             paper = Path(temporary) / "paper"
             paper.mkdir()
@@ -38,7 +39,7 @@ class ExtractPaperMetadataTests(unittest.TestCase):
                 status = extract_paper_metadata.main([str(paper), "--dry-run"])
 
         self.assertEqual(status, 0)
-        self.assertIn("Would ask Codex", output.getvalue())
+        self.assertIn("Would ask Claude", output.getvalue())
         self.assertIn(f"PDF: {paper / 'paper.pdf'}", output.getvalue())
         self.assertIn(f"Source: {paper / 'source'}", output.getvalue())
 
@@ -63,7 +64,7 @@ class ExtractPaperMetadataTests(unittest.TestCase):
             schema = Path(temporary) / "schema.json"
             schema.write_text("{}", encoding="utf-8")
 
-            def run_codex(**kwargs):
+            def run_agent(**kwargs):
                 self.assertTrue((kwargs["workspace"] / "source" / "main.tex").is_file())
                 result = kwargs["workspace"] / "agent-result.json"
                 result.write_text(json.dumps({
@@ -75,16 +76,15 @@ class ExtractPaperMetadataTests(unittest.TestCase):
                 return result
 
             with (
-                patch.object(codex_cli, "grant_sandbox_read_access"),
-                patch.object(codex_cli, "run_structured_codex", side_effect=run_codex),
+                patch.object(claude_cli, "run_structured_agent", side_effect=run_agent),
                 redirect_stdout(StringIO()),
             ):
                 result = extract_paper_metadata.extract_metadata(
                     paper,
-                    codex="codex",
+                    claude="claude",
                     prompt="Extract metadata",
                     schema_path=schema,
-                    options=codex_cli.ModelOptions(),
+                    options=claude_cli.ModelOptions(),
                 )
 
             metadata = json.loads((paper / "metadata.json").read_text())

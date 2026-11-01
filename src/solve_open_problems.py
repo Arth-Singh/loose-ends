@@ -16,7 +16,7 @@ import sys
 import tempfile
 from typing import Callable, Sequence
 
-import codex_cli
+import claude_cli
 import open_problem_common as common
 import review_solutions
 from validation import solver as solver_validation
@@ -188,7 +188,7 @@ def render_prompt(
         )
         .replace(
             "{{CONTEXT_DIRECTORY}}",
-            codex_cli.path_for_codex(context_directory),
+            str(context_directory),
         )
     )
 
@@ -197,13 +197,13 @@ def _validated_artifact_paths(workspace: Path, values: object) -> list[Path]:
     if not isinstance(values, list) or not all(
         isinstance(value, str) for value in values
     ):
-        raise common.CodexError("solver response has invalid artifacts")
+        raise common.AgentError("solver response has invalid artifacts")
     paths: list[Path] = []
     seen: set[str] = set()
     for value in values:
         relative = _artifact_relative_path(workspace, value)
         if relative is None:
-            raise common.CodexError(
+            raise common.AgentError(
                 f"solver response has unsafe artifact path: {value!r}"
             )
         normalized = relative.as_posix()
@@ -215,7 +215,7 @@ def _validated_artifact_paths(workspace: Path, values: object) -> list[Path]:
             or ".." in relative.parts
             or normalized in seen
         ):
-            raise common.CodexError(
+            raise common.AgentError(
                 f"solver response has unsafe artifact path: {value!r}"
             )
         if relative.parts[0] == "artifacts":
@@ -223,7 +223,7 @@ def _validated_artifact_paths(workspace: Path, values: object) -> list[Path]:
         elif len(relative.parts) == 1:
             source = workspace / relative.name
             if not source.is_file():
-                raise common.CodexError(
+                raise common.AgentError(
                     f"solver-listed artifact does not exist: {value}"
                 )
             path = workspace / "artifacts" / relative.name
@@ -233,16 +233,16 @@ def _validated_artifact_paths(workspace: Path, values: object) -> list[Path]:
             relative = PurePosixPath("artifacts", relative.name)
             normalized = relative.as_posix()
         else:
-            raise common.CodexError(
+            raise common.AgentError(
                 f"solver response has unsafe artifact path: {value!r}"
             )
         if normalized in seen:
-            raise common.CodexError(
+            raise common.AgentError(
                 f"solver response has unsafe artifact path: {value!r}"
             )
         seen.add(normalized)
         if not path.is_file():
-            raise common.CodexError(
+            raise common.AgentError(
                 f"solver-listed artifact does not exist: {value}"
             )
         paths.append(path)
@@ -262,24 +262,12 @@ def _artifact_relative_path(
     if target.startswith("<") and target.endswith(">"):
         target = target[1:-1]
     target = re.sub(r":\d+(?::\d+)?$", "", target)
-    normalized = target.replace("\\", "/")
-    if re.match(r"^/[A-Za-z]:/", normalized):
-        normalized = normalized[1:]
-    roots = {
-        workspace.resolve().as_posix().rstrip("/"),
-        codex_cli.path_for_codex(workspace).replace("\\", "/").rstrip("/"),
-    }
-    folded = normalized.casefold()
-    for root in roots:
-        prefix = root.casefold() + "/"
-        if folded.startswith(prefix):
-            normalized = normalized[len(root) + 1:]
-            break
-    else:
-        if normalized.startswith("/") or re.match(
-            r"^[A-Za-z]:/", normalized
-        ):
-            return None
+    normalized = target
+    root = workspace.resolve().as_posix().rstrip("/") + "/"
+    if normalized.startswith(root):
+        normalized = normalized[len(root):]
+    elif normalized.startswith("/"):
+        return None
     relative = PurePosixPath(normalized)
     if not relative.parts or relative.is_absolute() or ".." in relative.parts:
         return None
@@ -390,31 +378,31 @@ def validate_solver_result(
     result = common.read_json(result_path, description="solver response")
     claimed_result_type = result.get("claimed_result_type")
     if claimed_result_type not in SOLUTION_STATUSES:
-        raise common.CodexError(
+        raise common.AgentError(
             "solver response has an invalid claimed_result_type"
         )
     if not isinstance(result.get("summary"), str) or not result[
         "summary"
     ].strip():
-        raise common.CodexError("solver response has no summary")
+        raise common.AgentError("solver response has no summary")
     external_sources = result.get("external_sources")
     if not isinstance(external_sources, list):
-        raise common.CodexError("solver response has invalid external_sources")
+        raise common.AgentError("solver response has invalid external_sources")
     for source in external_sources:
         if not isinstance(source, dict):
-            raise common.CodexError("solver external source is not an object")
+            raise common.AgentError("solver external source is not an object")
         for field in ("title", "url", "used_for", "verification"):
             if not isinstance(source.get(field), str):
-                raise common.CodexError(
+                raise common.AgentError(
                     f"solver external source has invalid {field}"
                 )
         if not source["url"].startswith(("https://", "http://")):
-            raise common.CodexError("solver external source has invalid URL")
+            raise common.AgentError("solver external source has invalid URL")
     warnings = result.get("warnings")
     if not isinstance(warnings, list) or not all(
         isinstance(value, str) for value in warnings
     ):
-        raise common.CodexError("solver response has invalid warnings")
+        raise common.AgentError("solver response has invalid warnings")
     # Preserved workspaces from the pre-snapshot schema have no lineage field.
     # Treat them as having supplied no structured reconciliation so recovery
     # remains backward compatible; fresh validated runs require the field.
@@ -423,18 +411,18 @@ def validate_solver_result(
     claim_id_changes = _normalize_solver_claim_ids(result)
     claims = result.get("checkable_claims")
     if not isinstance(claims, list):
-        raise common.CodexError("solver response has no checkable_claims array")
+        raise common.AgentError("solver response has no checkable_claims array")
     claim_ids: set[str] = set()
     for claim in claims:
         if not isinstance(claim, dict):
-            raise common.CodexError("a solver claim is not an object")
+            raise common.AgentError("a solver claim is not an object")
         claim_id = claim.get("id")
         if (
             not isinstance(claim_id, str)
             or not CLAIM_ID_RE.fullmatch(claim_id)
             or claim_id in claim_ids
         ):
-            raise common.CodexError(
+            raise common.AgentError(
                 f"invalid or duplicate solver claim ID: {claim_id!r}"
             )
         claim_ids.add(claim_id)
@@ -448,31 +436,31 @@ def validate_solver_result(
             "obstruction",
             "other",
         }:
-            raise common.CodexError(
+            raise common.AgentError(
                 f"solver claim {claim_id} has an invalid type"
             )
         for field in ("statement", "support", "remaining_gap"):
             if not isinstance(claim.get(field), str):
-                raise common.CodexError(
+                raise common.AgentError(
                     f"solver claim {claim_id} has invalid {field}"
                 )
     if claimed_result_type == "none" and claims:
-        raise common.CodexError(
+        raise common.AgentError(
             "none response unexpectedly contains claims"
         )
     if claimed_result_type != "none" and not claims:
-        raise common.CodexError(
+        raise common.AgentError(
             f"{claimed_result_type} response contains no checkable claims"
         )
     dispositions = result.get("prior_claim_dispositions")
     if not isinstance(dispositions, list):
-        raise common.CodexError(
+        raise common.AgentError(
             "solver response has invalid prior_claim_dispositions"
         )
     seen_prior_claims: set[tuple[str, str]] = set()
     for disposition in dispositions:
         if not isinstance(disposition, dict):
-            raise common.CodexError("solver prior disposition is not an object")
+            raise common.AgentError("solver prior disposition is not an object")
         source_attempt = disposition.get("source_attempt")
         source_claim_id = disposition.get("source_claim_id")
         if (
@@ -481,28 +469,28 @@ def validate_solver_result(
             or not isinstance(source_claim_id, str)
             or CLAIM_ID_RE.fullmatch(source_claim_id) is None
         ):
-            raise common.CodexError("solver prior disposition has invalid source claim")
+            raise common.AgentError("solver prior disposition has invalid source claim")
         source = (source_attempt, source_claim_id)
         if source in seen_prior_claims:
-            raise common.CodexError(
+            raise common.AgentError(
                 f"duplicate solver prior disposition: {source_attempt}/{source_claim_id}"
             )
         seen_prior_claims.add(source)
         value = disposition.get("disposition")
         if value not in solver_validation.PRIOR_DISPOSITIONS:
-            raise common.CodexError("solver prior disposition has invalid status")
+            raise common.AgentError("solver prior disposition has invalid status")
         if not isinstance(disposition.get("explanation"), str) or not disposition[
             "explanation"
         ].strip():
-            raise common.CodexError("solver prior disposition has no explanation")
+            raise common.AgentError("solver prior disposition has no explanation")
         current_claim_id = disposition.get("current_claim_id")
         if value == "refuted":
             if current_claim_id != "":
-                raise common.CodexError(
+                raise common.AgentError(
                     "refuted solver prior disposition has nonempty current_claim_id"
                 )
         elif current_claim_id not in claim_ids:
-            raise common.CodexError(
+            raise common.AgentError(
                 "active solver prior disposition references an unknown current claim"
             )
     if require_markdown:
@@ -519,7 +507,7 @@ def validate_solver_result(
             claim_id for claim_id in claim_ids if claim_id not in contents
         ]
         if missing_ids:
-            raise common.CodexError(
+            raise common.AgentError(
                 "attempt.md omits claims: "
                 + ", ".join(sorted(missing_ids))
             )
@@ -615,121 +603,6 @@ def recover_alternate_attempt_markdown(
     return True
 
 
-def _recovered_attempt_markdown(work: SolveWork, result: dict) -> str:
-    """Render the auditable structured result when the sandbox blocked Markdown."""
-    lines = [
-        f"# {work.problem.id} — {work.problem.title}",
-        "",
-        "> **Driver recovery notice.** The elevated Windows sandbox blocked "
-        "the solver from creating `attempt.md`. This document was generated "
-        "from the completed structured solver response; it may be less "
-        "detailed than the intended research narrative.",
-        "",
-        "## Solver summary",
-        "",
-        result["summary"].strip(),
-        "",
-        "## History reconciliation",
-        "",
-    ]
-    dispositions = result["prior_claim_dispositions"]
-    if not dispositions:
-        lines.extend(["No material prior claim disposition was reported.", ""])
-    for disposition in dispositions:
-        replacement = (
-            f" → `{disposition['current_claim_id']}`"
-            if disposition.get("current_claim_id")
-            else ""
-        )
-        lines.extend(
-            [
-                f"- `{disposition['source_attempt']}/{disposition['source_claim_id']}`: "
-                f"**{disposition['disposition']}**{replacement}. "
-                f"{disposition['explanation'].strip()}",
-                "",
-            ]
-        )
-    lines.extend([
-        "## Checkable claims",
-        "",
-    ])
-    claims = result["checkable_claims"]
-    if not claims:
-        lines.extend(["No checkable claim was reported.", ""])
-    for claim in claims:
-        lines.extend(
-            [
-                f"### {claim['id']} — {claim['type']}",
-                "",
-                f"**Statement.** {claim['statement'].strip()}",
-                "",
-                f"**Support.** {claim['support'].strip()}",
-                "",
-                f"**Remaining gap.** {claim['remaining_gap'].strip()}",
-                "",
-            ]
-        )
-    lines.extend(["## External sources", ""])
-    sources = result["external_sources"]
-    if not sources:
-        lines.extend(["No external source was reported.", ""])
-    for source in sources:
-        lines.extend(
-            [
-                f"- [{source['title']}]({source['url']}) — "
-                f"{source['used_for']} Verification: "
-                f"{source['verification']}",
-                "",
-            ]
-        )
-    lines.extend(["## Warnings and limitations", ""])
-    warnings = result["warnings"]
-    if not warnings:
-        lines.extend(["No warning was reported.", ""])
-    else:
-        lines.extend(f"- {warning}" for warning in warnings)
-        lines.append("")
-    return "\n".join(lines).rstrip() + "\n"
-
-
-def recover_missing_attempt_markdown(
-    work: SolveWork,
-    workspace: Path,
-) -> bool:
-    """Recover a completed result whose only core write failure was ACL setup."""
-    attempt_path = workspace / "attempt.md"
-    if attempt_path.is_file():
-        return False
-    result_path = workspace / "agent-result.json"
-    events_path = workspace / "events.jsonl"
-    log_path = workspace / "run.log"
-    if not codex_cli.structured_turn_is_complete(events_path, result_path):
-        return False
-    try:
-        log = log_path.read_text(encoding="utf-8", errors="replace").lower()
-    except OSError:
-        return False
-    if codex_cli.WINDOWS_SANDBOX_ACL_FAILURE not in log:
-        return False
-    result, _ = validate_solver_result(
-        result_path,
-        workspace,
-        require_markdown=False,
-    )
-    warning = (
-        "Driver recovery: attempt.md was synthesized from the completed "
-        "structured response after the elevated Windows sandbox ACL failure."
-    )
-    if warning not in result["warnings"]:
-        result["warnings"].append(warning)
-        common.write_json(result_path, result)
-    attempt_path.write_text(
-        _recovered_attempt_markdown(work, result),
-        encoding="utf-8",
-    )
-    return True
-
-
 def _install_attempt(
     work: SolveWork,
     *,
@@ -737,22 +610,17 @@ def _install_attempt(
     result: dict,
     artifacts: Sequence[Path],
     config_digest: str | None,
-    codex_version: str,
-    options: codex_cli.ModelOptions,
+    claude_version: str,
+    options: claude_cli.ModelOptions,
     prior_history_digest: str,
     web_search: str = "live",
     recovered_from: Path | None = None,
 ) -> Path:
     destination = work.problem.directory / work.attempt_name
     if destination.exists():
-        raise common.CodexError(
+        raise common.AgentError(
             f"attempt destination already exists: {destination}"
         )
-    # The elevated Windows sandbox can leave deny ACLs on ancestors of its
-    # nested workspace.  Installing an attempt is a sibling-directory rename,
-    # which requires the invoking user to retain full control of the problem
-    # directory itself, not just of the normalized solver workspace.
-    codex_cli.grant_workspace_owner_inheritance(work.problem.directory)
     staging = Path(
         tempfile.mkdtemp(prefix=".attempt-install-", dir=work.problem.directory)
     )
@@ -772,11 +640,10 @@ def _install_attempt(
             "literature_snapshot_digest": work.literature_snapshot_digest,
             "research_guidance": work.guidance,
             "config_digest": config_digest,
-            "codex_version": codex_version,
+            "claude_version": claude_version,
             "requested_model": options.model,
             "requested_reasoning_effort": options.reasoning_effort,
-            "requested_fast_mode": options.fast,
-            "requested_service_tier": options.service_tier,
+            "requested_max_budget_usd": options.max_budget_usd,
             "requested_web_search": web_search,
             "claimed_result_type": result["claimed_result_type"],
             "claim_count": len(result["checkable_claims"]),
@@ -806,7 +673,7 @@ def _install_attempt(
                 shutil.copyfile(source, target)
         os.replace(staging, destination)
     except OSError as exc:
-        raise common.CodexError(
+        raise common.AgentError(
             f"could not install solver attempt; staging preserved at "
             f"{staging}: {exc}"
         ) from exc
@@ -825,8 +692,8 @@ def _write_work_record(
     work: SolveWork,
     *,
     config_digest: str,
-    codex_version: str,
-    options: codex_cli.ModelOptions,
+    claude_version: str,
+    options: claude_cli.ModelOptions,
     prior_history_digest: str,
     web_search: str = "live",
 ) -> None:
@@ -841,11 +708,10 @@ def _write_work_record(
             "literature_snapshot_digest": work.literature_snapshot_digest,
             "prior_attempt_history_digest": prior_history_digest,
             "config_digest": config_digest,
-            "codex_version": codex_version,
+            "claude_version": claude_version,
             "requested_model": options.model,
             "requested_reasoning_effort": options.reasoning_effort,
-            "requested_fast_mode": options.fast,
-            "requested_service_tier": options.service_tier,
+            "requested_max_budget_usd": options.max_budget_usd,
             "requested_web_search": web_search,
         },
     )
@@ -872,10 +738,10 @@ def _recovery_workspace_matches(
 def recover_solver_work(
     work: SolveWork,
     *,
-    codex: str,
-    codex_version: str,
+    claude: str,
+    claude_version: str,
     config_digest: str,
-    options: codex_cli.ModelOptions,
+    options: claude_cli.ModelOptions,
     web_search: str = "live",
 ) -> SolveOutcome | None:
     """Install a matching completed preserved workspace without another turn."""
@@ -902,9 +768,7 @@ def recover_solver_work(
         if not matches:
             continue
         assert record is not None
-        codex_cli.normalize_workspace_access(workspace, codex)
         recover_alternate_attempt_markdown(work, workspace)
-        recover_missing_attempt_markdown(work, workspace)
         if not (workspace / "attempt.md").is_file():
             continue
         result, artifacts = validate_solver_result(
@@ -923,7 +787,7 @@ def recover_solver_work(
             result=result,
             artifacts=artifacts,
             config_digest=record["config_digest"],
-            codex_version=record.get("codex_version", codex_version),
+            claude_version=record.get("claude_version", claude_version),
             options=options,
             prior_history_digest=prior_history_digest,
             web_search=record.get("requested_web_search", web_search),
@@ -951,21 +815,21 @@ def recover_solver_work(
 def solve_work(
     work: SolveWork,
     *,
-    codex: str,
-    codex_version: str,
+    claude: str,
+    claude_version: str,
     prompt_template: str,
     schema_path: Path,
     config_digest: str,
-    options: codex_cli.ModelOptions,
+    options: claude_cli.ModelOptions,
     web_search: str = "live",
-    launch_interval: float = codex_cli.CODEX_LAUNCH_INTERVAL_SECONDS,
+    launch_interval: float = claude_cli.AGENT_LAUNCH_INTERVAL_SECONDS,
 ) -> SolveOutcome:
     """Run and install one adaptive solver attempt."""
     work.problem.directory.mkdir(parents=True, exist_ok=True)
     recovered = recover_solver_work(
         work,
-        codex=codex,
-        codex_version=codex_version,
+        claude=claude,
+        claude_version=claude_version,
         config_digest=config_digest,
         options=options,
         web_search=web_search,
@@ -980,7 +844,7 @@ def solve_work(
         workspace,
         work,
         config_digest=config_digest,
-        codex_version=codex_version,
+        claude_version=claude_version,
         options=options,
         prior_history_digest=prior_history_digest,
         web_search=web_search,
@@ -999,12 +863,12 @@ def solve_work(
             work=work,
             context_directory=context,
         )
-        report = codex_cli.run_validated_codex(
-            codex=codex,
+        report = claude_cli.run_validated_agent(
+            claude=claude,
             workspace=workspace,
             prompt=prompt,
             schema_path=schema_path,
-            validator=codex_cli.OutputValidator(
+            validator=claude_cli.OutputValidator(
                 Path(solver_validation.__file__).resolve(),
                 solver_validation.validate,
                 {"prior_claim_refs": _prior_claim_refs(work.problem)},
@@ -1014,7 +878,7 @@ def solve_work(
             launch_interval=launch_interval,
             completion_grace_seconds=COMPLETION_GRACE_SECONDS,
         )
-        result = codex_cli.validated_result(report)
+        result = claude_cli.validated_result(report)
         artifacts = [
             path for path in report.files
             if path != workspace / "attempt.md"
@@ -1025,13 +889,13 @@ def solve_work(
             result=result,
             artifacts=artifacts,
             config_digest=config_digest,
-            codex_version=codex_version,
+            claude_version=claude_version,
             options=options,
             prior_history_digest=prior_history_digest,
             web_search=web_search,
         )
-    except (common.CodexError, OSError) as exc:
-        raise common.CodexError(
+    except (common.AgentError, OSError) as exc:
+        raise common.AgentError(
             common.preserved_workspace_message(exc, workspace)
         ) from exc
     warning = common.cleanup_workspace(
@@ -1057,12 +921,12 @@ def solve_work(
 def solve_many(
     work_items: Sequence[SolveWork],
     *,
-    codex: str,
-    codex_version: str,
+    claude: str,
+    claude_version: str,
     prompt_template: str,
     schema_path: Path,
     config_digest: str,
-    options: codex_cli.ModelOptions,
+    options: claude_cli.ModelOptions,
     jobs: int,
     web_search: str = "live",
     on_finished: SolveFinishedCallback | None = None,
@@ -1078,8 +942,8 @@ def solve_many(
             executor.submit(
                 solve_work,
                 work,
-                codex=codex,
-                codex_version=codex_version,
+                claude=claude,
+                claude_version=claude_version,
                 prompt_template=prompt_template,
                 schema_path=schema_path,
                 config_digest=config_digest,
@@ -1092,7 +956,7 @@ def solve_many(
             work = future_to_work[future]
             try:
                 outcome = future.result()
-            except (common.CodexError, OSError) as exc:
+            except (common.AgentError, OSError) as exc:
                 message = str(exc)
                 failures.append((work, message))
                 if on_finished is not None:
@@ -1102,18 +966,6 @@ def solve_many(
                 if on_finished is not None:
                     on_finished(work, outcome, None)
     return outcomes, failures
-
-
-def _inherit_review_options(
-    solver_options: codex_cli.ModelOptions,
-    review_options: codex_cli.ModelOptions,
-) -> codex_cli.ModelOptions:
-    return codex_cli.ModelOptions(
-        review_options.model or solver_options.model,
-        review_options.reasoning_effort or solver_options.reasoning_effort,
-        review_options.fast or (solver_options.fast and not review_options.ultrafast),
-        review_options.ultrafast or (solver_options.ultrafast and not review_options.fast),
-    )
 
 
 def review_confirms_resolution(
@@ -1214,14 +1066,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "-j",
         "--jobs",
-        type=codex_cli.positive_integer,
+        type=claude_cli.positive_integer,
         default=1,
         help="maximum concurrent solver agents (default: 1)",
     )
     parser.add_argument(
         "-r",
         "--max-rounds",
-        type=codex_cli.positive_integer,
+        type=claude_cli.positive_integer,
         default=1,
         metavar="N",
         help=(
@@ -1241,12 +1093,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--review-jobs",
-        type=codex_cli.positive_integer,
+        type=claude_cli.positive_integer,
         help="maximum concurrent critics (default: --jobs)",
     )
     parser.add_argument(
         "--review-timeout-minutes",
-        type=codex_cli.positive_number,
+        type=claude_cli.positive_number,
         default=review_solutions.DEFAULT_TIMEOUT_MINUTES,
         metavar="MINUTES",
         help=(
@@ -1265,14 +1117,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="report adaptive solver attempts without starting Codex",
+        help="report adaptive solver attempts without starting Claude",
     )
     parser.add_argument(
-        "--codex",
-        default="codex",
-        help="Codex CLI executable or command name (default: codex)",
+        "--claude",
+        default="claude",
+        help="Claude Code executable or command name (default: claude)",
     )
-    codex_cli.add_prompt_arguments(
+    claude_cli.add_prompt_arguments(
         parser,
         default_template=DEFAULT_PROMPT_PATH,
         task="open-problem solver",
@@ -1283,7 +1135,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_SCHEMA_PATH,
         help=f"solver agent-result schema (default: {DEFAULT_SCHEMA_PATH})",
     )
-    codex_cli.add_prompt_arguments(
+    claude_cli.add_prompt_arguments(
         parser,
         default_template=DEFAULT_REVIEW_PROMPT_PATH,
         task="solution critic",
@@ -1295,10 +1147,10 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_REVIEW_SCHEMA_PATH,
         help=f"critic agent-result schema (default: {DEFAULT_REVIEW_SCHEMA_PATH})",
     )
-    codex_cli.add_model_arguments(parser)
-    codex_cli.add_model_arguments(parser, prefix="review")
-    codex_cli.add_web_search_argument(parser, default="live")
-    codex_cli.add_web_search_argument(
+    claude_cli.add_model_arguments(parser, **claude_cli.stage_model_defaults("solve"))
+    claude_cli.add_model_arguments(parser, prefix="review")
+    claude_cli.add_web_search_argument(parser, default="live")
+    claude_cli.add_web_search_argument(
         parser,
         default="live",
         prefix="review",
@@ -1307,7 +1159,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    codex_cli.configure_utf8_stdio()
+    claude_cli.configure_utf8_stdio()
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
@@ -1317,7 +1169,7 @@ def main(argv: list[str] | None = None) -> int:
             or args.problem_ids
             or args.all_problems
         ):
-            raise common.CodexError(
+            raise common.AgentError(
                 "direct problem paths cannot be combined with "
                 "--from-triage, --problem, or --all-problems"
             )
@@ -1326,7 +1178,7 @@ def main(argv: list[str] | None = None) -> int:
             or args.problem_ids
             or args.all_problems
         ):
-            raise common.CodexError(
+            raise common.AgentError(
                 "select work with PAPER/OP-ID paths, "
                 "--from-triage, --problem, or --all-problems"
             )
@@ -1349,7 +1201,7 @@ def main(argv: list[str] | None = None) -> int:
                 try:
                     paper_value, problem_id = value.rsplit("::", 1)
                 except ValueError as exc:
-                    raise common.CodexError(
+                    raise common.AgentError(
                         f"invalid exact problem selector: {value!r}"
                     ) from exc
                 exact.add(
@@ -1364,15 +1216,15 @@ def main(argv: list[str] | None = None) -> int:
         prompt_path = args.prompt_template.expanduser().resolve()
         schema_path = args.schema.expanduser().resolve()
         prompt_template = prompt_path.read_text(encoding="utf-8")
-        prompt_template = codex_cli.with_user_prompt(
+        prompt_template = claude_cli.with_user_prompt(
             prompt_template,
             args.prompt,
             task="open-problem solver",
         )
         schema_text = schema_path.read_text(encoding="utf-8")
         json.loads(schema_text)
-        options = codex_cli.model_options_from_args(args)
-        config_digest = codex_cli.semantic_config_digest(
+        options = claude_cli.model_options_from_args(args)
+        config_digest = claude_cli.semantic_config_digest(
             prompt_template,
             schema_text,
             options,
@@ -1387,7 +1239,7 @@ def main(argv: list[str] | None = None) -> int:
         review_prompt_path = args.review_prompt_template.expanduser().resolve()
         review_schema_path = args.review_schema.expanduser().resolve()
         review_prompt = review_prompt_path.read_text(encoding="utf-8")
-        review_prompt = codex_cli.with_user_prompt(
+        review_prompt = claude_cli.with_user_prompt(
             review_prompt,
             args.review_prompt,
             task="solution critic",
@@ -1395,11 +1247,11 @@ def main(argv: list[str] | None = None) -> int:
         )
         review_schema_text = review_schema_path.read_text(encoding="utf-8")
         json.loads(review_schema_text)
-        review_options = _inherit_review_options(
+        review_options = claude_cli.inherit_model_options(
             options,
-            codex_cli.model_options_from_args(args, prefix="review"),
+            claude_cli.model_options_from_args(args, prefix="review"),
         )
-        review_config_digest = codex_cli.semantic_config_digest(
+        review_config_digest = claude_cli.semantic_config_digest(
             review_prompt,
             review_schema_text,
             review_options,
@@ -1409,16 +1261,16 @@ def main(argv: list[str] | None = None) -> int:
             ).resolve(),
         )
     except (
-        common.CodexError,
+        common.AgentError,
         OSError,
         UnicodeError,
         json.JSONDecodeError,
     ) as exc:
-        return codex_cli.report_error(parser, exc)
+        return claude_cli.report_error(parser, exc)
 
     if args.dry_run:
         if work_items:
-            codex_cli.report_codex_home_warnings()
+            claude_cli.report_agent_config_warnings()
         if args.prompt is not None:
             print(f"Solver direction: {args.prompt.strip()}")
         if args.review_prompt is not None and args.review != "none":
@@ -1458,20 +1310,15 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
     try:
-        codex = codex_cli.resolve_codex_executable(args.codex)
-        codex_version = codex_cli.read_codex_version(codex)
-        # Probe once before announcing or submitting the batch.  Per-turn
-        # probing remains as a guard against a helper that fails later, but a
-        # persistently broken Windows helper must not create one workspace and
-        # failure report per selected problem.
-        codex_cli.require_secure_windows_sandbox(codex, PROJECT_ROOT)
-    except common.CodexError as exc:
-        return codex_cli.report_error(parser, exc)
+        claude = claude_cli.resolve_agent_executable(args.claude)
+        claude_version = claude_cli.read_agent_version(claude)
+    except common.AgentError as exc:
+        return claude_cli.report_error(parser, exc)
     agent_count = min(args.jobs, len(work_items))
     if agent_count == 1:
-        concurrency = "sequentially with 1 Codex agent"
+        concurrency = "sequentially with 1 Claude agent"
     else:
-        concurrency = f"with up to {agent_count} concurrent Codex agents"
+        concurrency = f"with up to {agent_count} concurrent Claude agents"
     round_phrase = (
         "one round"
         if args.max_rounds == 1
@@ -1533,8 +1380,8 @@ def main(argv: list[str] | None = None) -> int:
 
         round_outcomes, round_failures = solve_many(
             active_work,
-            codex=codex,
-            codex_version=codex_version,
+            claude=claude,
+            claude_version=claude_version,
             prompt_template=prompt_template,
             schema_path=schema_path,
             config_digest=config_digest,
@@ -1566,7 +1413,7 @@ def main(argv: list[str] | None = None) -> int:
             print(
                 f"Reviewing {len(selected_attempts)} new attempt(s), with up "
                 f"to {min(args.review_jobs or args.jobs, len(selected_attempts))} "
-                f"Codex critic(s) at once."
+                f"Claude critic(s) at once."
             )
             review_finished_count = 0
 
@@ -1606,8 +1453,8 @@ def main(argv: list[str] | None = None) -> int:
                 round_review_failures,
             ) = review_solutions.review_many(
                 selected_attempts,
-                codex=codex,
-                codex_version=codex_version,
+                claude=claude,
+                claude_version=claude_version,
                 prompt_template=review_prompt,
                 schema_path=review_schema_path,
                 config_digest=review_config_digest,

@@ -13,7 +13,7 @@ import support
 
 support.use_resolved_temp_root()
 
-import codex_cli
+import claude_cli
 import open_problem_common as common
 import write_paper
 
@@ -160,8 +160,24 @@ def make_ready_attempt(paper: Path, problem_id: str, attempt_number: int = 1) ->
 
 
 def write_run_files(workspace: Path) -> None:
+    events = (
+        {
+            "type": "system",
+            "subtype": "init",
+            "session_id": "s1",
+            "model": claude_cli.DEFAULT_MODEL,
+        },
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "session_id": "s1",
+            "total_cost_usd": 0.01,
+            "usage": {"input_tokens": 10, "output_tokens": 5},
+        },
+    )
     (workspace / "events.jsonl").write_text(
-        '{"type":"turn.completed"}\n',
+        "".join(json.dumps(event) + "\n" for event in events),
         encoding="utf-8",
     )
     (workspace / "run.log").write_text("", encoding="utf-8")
@@ -240,11 +256,6 @@ def write_manuscript_files(workspace: Path, result_ids: list[str]) -> None:
 
 
 class WritePaperTests(unittest.TestCase):
-    def setUp(self):
-        patcher = patch.object(codex_cli, "grant_sandbox_read_access")
-        patcher.start()
-        self.addCleanup(patcher.stop)
-
     def test_loads_explicit_attempts_and_derives_readable_name(self):
         with TemporaryDirectory() as temporary:
             paper = make_paper(Path(temporary))
@@ -601,7 +612,7 @@ class WritePaperTests(unittest.TestCase):
         with (
             patch.object(common, "discover_problem_refs") as discover,
             self.assertRaisesRegex(
-                common.CodexError,
+                common.AgentError,
                 "problem selector is missing or invalid",
             ),
         ):
@@ -610,8 +621,12 @@ class WritePaperTests(unittest.TestCase):
 
     def test_cli_defaults_to_one_live_frontier_round(self):
         parsed = write_paper.build_parser().parse_args(["attempt-001"])
-        self.assertEqual(parsed.model, "gpt-6-astra")
-        self.assertEqual(parsed.reasoning_effort, "xhigh")
+        self.assertEqual(parsed.model, claude_cli.DEFAULT_MODEL)
+        self.assertEqual(
+            parsed.reasoning_effort,
+            claude_cli.DEFAULT_REASONING_EFFORT,
+        )
+        self.assertIsNone(parsed.max_budget_usd)
         self.assertEqual(parsed.web_search, "live")
         self.assertEqual(parsed.max_rounds, 1)
         self.assertFalse(parsed.refresh_results)
@@ -818,7 +833,7 @@ class WritePaperTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            with self.assertRaisesRegex(common.CodexError, r"\\date\{\}"):
+            with self.assertRaisesRegex(common.AgentError, r"\\date\{\}"):
                 write_paper.validate_paper_result(
                     workspace / "agent-result.json",
                     workspace,
@@ -844,7 +859,7 @@ class WritePaperTests(unittest.TestCase):
                 workspace / "agent-result.json",
                 invalid_url_response,
             )
-            with self.assertRaisesRegex(common.CodexError, "invalid URL"):
+            with self.assertRaisesRegex(common.AgentError, "invalid URL"):
                 write_paper.validate_paper_result(
                     workspace / "agent-result.json",
                     workspace,
@@ -856,7 +871,7 @@ class WritePaperTests(unittest.TestCase):
                 workspace / "agent-result.json",
                 unpaired_response,
             )
-            with self.assertRaisesRegex(common.CodexError, "matching PDF"):
+            with self.assertRaisesRegex(common.AgentError, "matching PDF"):
                 write_paper.validate_paper_result(
                     workspace / "agent-result.json",
                     workspace,
@@ -869,7 +884,7 @@ class WritePaperTests(unittest.TestCase):
                 workspace / "agent-result.json",
                 unsafe_response,
             )
-            with self.assertRaisesRegex(common.CodexError, "unsafe generated"):
+            with self.assertRaisesRegex(common.AgentError, "unsafe generated"):
                 write_paper.validate_paper_result(
                     workspace / "agent-result.json",
                     workspace,
@@ -883,7 +898,7 @@ class WritePaperTests(unittest.TestCase):
                 "@article{different, title={Other}}\n",
                 encoding="utf-8",
             )
-            with self.assertRaisesRegex(common.CodexError, "missing bibliography"):
+            with self.assertRaisesRegex(common.AgentError, "missing bibliography"):
                 write_paper.validate_paper_result(
                     workspace / "agent-result.json",
                     workspace,
@@ -940,7 +955,7 @@ class WritePaperTests(unittest.TestCase):
             )
             common.write_json(workspace / "agent-result.json", unknown)
             with self.assertRaisesRegex(
-                common.CodexError,
+                common.AgentError,
                 "invalid addressed finding 'P-999'",
             ):
                 write_paper.validate_paper_result(
@@ -1001,12 +1016,12 @@ class WritePaperTests(unittest.TestCase):
             )
             try:
                 latexmk = write_paper.resolve_latexmk("latexmk")
-            except common.CodexError as exc:
+            except common.AgentError as exc:
                 self.skipTest(str(exc))
 
             try:
                 pdf = write_paper.compile_latex(workspace, latexmk)
-            except common.CodexError as exc:
+            except common.AgentError as exc:
                 self.fail(
                     f"{exc}\n"
                     + (workspace / "build.log").read_text(
@@ -1017,6 +1032,16 @@ class WritePaperTests(unittest.TestCase):
             self.assertTrue(pdf.is_file())
             self.assertGreater(pdf.stat().st_size, 0)
             self.assertTrue((workspace / "build.log").is_file())
+
+    def test_missing_latexmk_names_the_macos_tex_install(self):
+        with (
+            patch.object(write_paper.shutil, "which", return_value=None),
+            self.assertRaisesRegex(
+                common.AgentError,
+                r"'latexmk' on PATH.*TinyTeX or MacTeX",
+            ),
+        ):
+            write_paper.resolve_latexmk("latexmk")
 
     def test_compile_latex_accepts_locale_encoded_tex_log(self):
         with TemporaryDirectory() as temporary:
@@ -1051,7 +1076,7 @@ class WritePaperTests(unittest.TestCase):
             manuscript = root / "manuscripts" / "test"
             calls = {"writer": 0, "reviewer": 0}
 
-            def fake_codex(**kwargs):
+            def fake_agent(**kwargs):
                 workspace = kwargs["workspace"]
                 if kwargs["schema_path"].name == "open-problem-paper.schema.json":
                     calls["writer"] += 1
@@ -1152,13 +1177,13 @@ class WritePaperTests(unittest.TestCase):
                 (workspace / "main.pdf").write_bytes(b"%PDF-paper")
                 return workspace / "main.pdf"
 
-            options = codex_cli.ModelOptions("test-model", "high", False)
+            options = claude_cli.ModelOptions("test-model", "high")
             selectors = write_paper.input_selectors([attempt])
             with (
                 patch.object(
-                    codex_cli,
-                    "run_structured_codex",
-                    side_effect=fake_codex,
+                    claude_cli,
+                    "run_structured_agent",
+                    side_effect=fake_agent,
                 ),
                 patch.object(
                     write_paper,
@@ -1174,8 +1199,8 @@ class WritePaperTests(unittest.TestCase):
                     authors=["Test Author"],
                     title_hint=None,
                     max_rounds=3,
-                    codex="codex",
-                    codex_version="test",
+                    claude="claude",
+                    claude_version="test",
                     latexmk="latexmk",
                     prompt_template=write_paper.DEFAULT_PROMPT_PATH.read_text(
                         encoding="utf-8"
@@ -1241,7 +1266,7 @@ class WritePaperTests(unittest.TestCase):
             draft,
             {"verdict": "needs_minor_revision"},
         )
-        options = codex_cli.ModelOptions()
+        options = claude_cli.ModelOptions()
         with (
             patch.object(write_paper, "run_author_round", return_value=draft) as author,
             patch.object(write_paper, "run_paper_review", return_value=review) as critic,
@@ -1253,8 +1278,8 @@ class WritePaperTests(unittest.TestCase):
                 authors=["Anonymous"],
                 title_hint=None,
                 max_rounds=1,
-                codex="codex",
-                codex_version="test",
+                claude="claude",
+                claude_version="test",
                 latexmk="latexmk",
                 prompt_template="prompt",
                 schema_path=Path("paper-schema.json"),
@@ -1290,7 +1315,7 @@ class WritePaperTests(unittest.TestCase):
             second,
             {"verdict": "ready_for_expert_review"},
         )
-        options = codex_cli.ModelOptions()
+        options = claude_cli.ModelOptions()
         output = StringIO()
         with (
             patch.object(
@@ -1312,8 +1337,8 @@ class WritePaperTests(unittest.TestCase):
                 authors=[],
                 title_hint=None,
                 max_rounds=2,
-                codex="codex",
-                codex_version="test",
+                claude="claude",
+                claude_version="test",
                 latexmk="latexmk",
                 prompt_template="prompt",
                 schema_path=Path("paper-schema.json"),
@@ -1346,7 +1371,7 @@ class WritePaperTests(unittest.TestCase):
             draft,
             {"verdict": "needs_research"},
         )
-        options = codex_cli.ModelOptions()
+        options = claude_cli.ModelOptions()
         with (
             patch.object(
                 write_paper,
@@ -1366,8 +1391,8 @@ class WritePaperTests(unittest.TestCase):
                 authors=["Anonymous"],
                 title_hint=None,
                 max_rounds=1,
-                codex="codex",
-                codex_version="test",
+                claude="claude",
+                claude_version="test",
                 latexmk="latexmk",
                 prompt_template="prompt",
                 schema_path=Path("paper-schema.json"),
@@ -1397,7 +1422,7 @@ class WritePaperTests(unittest.TestCase):
             revised,
             {"verdict": "needs_research"},
         )
-        options = codex_cli.ModelOptions()
+        options = claude_cli.ModelOptions()
         calls: list[str] = []
 
         def author_round(*args, **kwargs):
@@ -1430,8 +1455,8 @@ class WritePaperTests(unittest.TestCase):
                 title_hint=None,
                 revision_instruction="Add figures",
                 max_rounds=1,
-                codex="codex",
-                codex_version="test",
+                claude="claude",
+                claude_version="test",
                 latexmk="latexmk",
                 prompt_template="prompt",
                 schema_path=Path("paper-schema.json"),
@@ -1461,7 +1486,7 @@ class WritePaperTests(unittest.TestCase):
             revised,
             {"verdict": "needs_research"},
         )
-        options = codex_cli.ModelOptions()
+        options = claude_cli.ModelOptions()
         calls: list[str] = []
 
         def author_round(*args, **kwargs):
@@ -1491,8 +1516,8 @@ class WritePaperTests(unittest.TestCase):
                 authors=[],
                 title_hint=None,
                 max_rounds=1,
-                codex="codex",
-                codex_version="test",
+                claude="claude",
+                claude_version="test",
                 latexmk="latexmk",
                 prompt_template="prompt",
                 schema_path=Path("paper-schema.json"),

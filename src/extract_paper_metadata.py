@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Use one bounded Codex turn to populate an installed paper's metadata."""
+"""Use one bounded Claude turn to populate an installed paper's metadata."""
 
 from __future__ import annotations
 
@@ -11,17 +11,16 @@ import shutil
 import tempfile
 
 import artifact_reporting
-import codex_cli
+import claude_cli
 from ingest_paper import is_iso8601_date_or_timestamp
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_PROMPT_PATH = PROJECT_ROOT / "prompts" / "extract-paper-metadata.md"
 DEFAULT_SCHEMA_PATH = PROJECT_ROOT / "schemas" / "paper-metadata.schema.json"
-DEFAULT_REASONING_EFFORT = "medium"
 
 
-class MetadataExtractionError(codex_cli.CodexError):
+class MetadataExtractionError(claude_cli.AgentError):
     pass
 
 
@@ -39,29 +38,29 @@ def load_metadata(path: Path) -> dict:
 
 def _date(value: object, field: str) -> str:
     if not isinstance(value, str):
-        raise MetadataExtractionError(f"Codex returned a non-string {field}")
+        raise MetadataExtractionError(f"Claude returned a non-string {field}")
     normalized = value.strip()
     if normalized and not is_iso8601_date_or_timestamp(normalized):
         raise MetadataExtractionError(
-            f"Codex returned an invalid ISO 8601 {field}: {normalized!r}"
+            f"Claude returned an invalid ISO 8601 {field}: {normalized!r}"
         )
     return normalized
 
 
 def validate_result(value: object) -> dict:
     if not isinstance(value, dict):
-        raise MetadataExtractionError("Codex metadata result is not an object")
+        raise MetadataExtractionError("Claude metadata result is not an object")
     title = value.get("title")
     authors = value.get("authors")
     if not isinstance(title, str) or not title.strip():
-        raise MetadataExtractionError("Codex returned no paper title")
+        raise MetadataExtractionError("Claude returned no paper title")
     if not isinstance(authors, list) or not authors or not all(
         isinstance(author, str) and author.strip() for author in authors
     ):
-        raise MetadataExtractionError("Codex returned no valid paper authors")
+        raise MetadataExtractionError("Claude returned no valid paper authors")
     normalized_authors = [author.strip() for author in authors]
     if len(set(normalized_authors)) != len(normalized_authors):
-        raise MetadataExtractionError("Codex returned duplicate paper authors")
+        raise MetadataExtractionError("Claude returned duplicate paper authors")
     return {
         "title": title.strip(),
         "authors": normalized_authors,
@@ -107,10 +106,10 @@ def install_metadata(path: Path, extracted: dict) -> Path:
 def extract_metadata(
     paper: Path,
     *,
-    codex: str,
+    claude: str,
     prompt: str,
     schema_path: Path,
-    options: codex_cli.ModelOptions,
+    options: claude_cli.ModelOptions,
     force: bool = False,
 ) -> Path | None:
     paper = paper.expanduser().resolve()
@@ -139,9 +138,8 @@ def extract_metadata(
             shutil.copy2(source, workspace / "source")
         staged_schema = workspace / "paper-metadata.schema.json"
         shutil.copy2(schema_path, staged_schema)
-        codex_cli.grant_sandbox_read_access(workspace)
-        result_path = codex_cli.run_structured_codex(
-            codex=codex,
+        result_path = claude_cli.run_structured_agent(
+            claude=claude,
             workspace=workspace,
             prompt=prompt,
             schema_path=staged_schema,
@@ -151,7 +149,7 @@ def extract_metadata(
             result = json.loads(result_path.read_text(encoding="utf-8"))
         except (OSError, UnicodeError, json.JSONDecodeError) as exc:
             raise MetadataExtractionError(
-                f"could not read Codex metadata result: {exc}"
+                f"could not read Claude metadata result: {exc}"
             ) from exc
         metadata_path = install_metadata(paper, validate_result(result))
     except (OSError, shutil.Error) as exc:
@@ -166,27 +164,24 @@ def extract_metadata(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="extract title and authors from an installed paper with Codex"
+        description="extract title and authors from an installed paper with Claude"
     )
     parser.add_argument("paper", type=Path, help="installed paper directory")
     parser.add_argument("--force", action="store_true", help="replace populated metadata")
     parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--codex", default="codex")
-    codex_cli.add_prompt_arguments(
+    parser.add_argument("--claude", default="claude")
+    claude_cli.add_prompt_arguments(
         parser,
         default_template=DEFAULT_PROMPT_PATH,
         task="paper metadata extractor",
     )
-    codex_cli.add_model_arguments(
-        parser,
-        default_reasoning_effort=DEFAULT_REASONING_EFFORT,
-    )
+    claude_cli.add_model_arguments(parser, **claude_cli.stage_model_defaults("metadata"))
     parser.add_argument("--schema", type=Path, default=DEFAULT_SCHEMA_PATH)
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
-    codex_cli.configure_utf8_stdio()
+    claude_cli.configure_utf8_stdio()
     parser = build_parser()
     args = parser.parse_args(argv)
     paper = args.paper.expanduser().resolve()
@@ -200,8 +195,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Would skip {paper}: title and authors are already present.")
             return 0
         if args.dry_run:
-            codex_cli.report_codex_home_warnings()
-            print("Would ask Codex to extract title and authors from:")
+            claude_cli.report_agent_config_warnings()
+            print("Would ask Claude to extract title and authors from:")
             print(f"  PDF: {paper / 'paper.pdf'}")
             source = paper / "source"
             print(f"  Source: {source if source.exists() else 'none'}")
@@ -209,21 +204,21 @@ def main(argv: list[str] | None = None) -> int:
         prompt_template = args.prompt_template.expanduser().resolve().read_text(
             encoding="utf-8"
         )
-        prompt = codex_cli.with_user_prompt(
+        prompt = claude_cli.with_user_prompt(
             prompt_template,
             args.prompt,
             task="paper metadata extraction",
         )
         extract_metadata(
             paper,
-            codex=codex_cli.resolve_codex_executable(args.codex),
+            claude=claude_cli.resolve_agent_executable(args.claude),
             prompt=prompt,
             schema_path=args.schema.expanduser().resolve(),
-            options=codex_cli.model_options_from_args(args),
+            options=claude_cli.model_options_from_args(args),
             force=args.force,
         )
     except (OSError, MetadataExtractionError) as exc:
-        return codex_cli.report_error(parser, exc)
+        return claude_cli.report_error(parser, exc)
     return 0
 
 

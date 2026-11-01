@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Analyze installed papers with independent non-interactive Codex runs."""
+"""Analyze installed papers with independent non-interactive Claude runs."""
 
 from __future__ import annotations
 
@@ -13,13 +13,12 @@ import os
 from pathlib import Path
 import re
 import shutil
-import subprocess
 import sys
 import tempfile
 from typing import Iterable
 
 import artifact_reporting
-import codex_cli
+import claude_cli
 from validation import analysis as analysis_validation
 
 
@@ -39,10 +38,9 @@ RESULT_HEADING_RE = re.compile(
     r"^#{1,6}[ \t]+(?:`|\*\*)?(R-[0-9]{3,})\b",
     re.MULTILINE,
 )
-REASONING_EFFORTS = codex_cli.REASONING_EFFORTS
-CODEX_LAUNCH_INTERVAL_SECONDS = codex_cli.CODEX_LAUNCH_INTERVAL_SECONDS
-MAX_CODEX_START_ATTEMPTS = codex_cli.MAX_CODEX_START_ATTEMPTS
-AnalysisError = codex_cli.CodexError
+REASONING_EFFORTS = claude_cli.REASONING_EFFORTS
+AGENT_LAUNCH_INTERVAL_SECONDS = claude_cli.AGENT_LAUNCH_INTERVAL_SECONDS
+AnalysisError = claude_cli.AgentError
 
 
 @dataclass(frozen=True)
@@ -135,16 +133,13 @@ def source_digest(paper_directory: Path) -> str:
 def analysis_config_digest(
     prompt: str,
     schema_text: str,
-    model: str | None,
-    reasoning_effort: str | None,
-    fast: bool,
-    ultrafast: bool = False,
+    options: claude_cli.ModelOptions,
 ) -> str:
     """Hash settings that affect the semantic analysis."""
-    return codex_cli.semantic_config_digest(
+    return claude_cli.semantic_config_digest(
         prompt,
         schema_text,
-        codex_cli.ModelOptions(model, reasoning_effort, fast, ultrafast),
+        options,
         validation_source=Path(analysis_validation.__file__).resolve(),
     )
 
@@ -232,33 +227,33 @@ def validate_agent_result(result_path: Path, workspace: Path) -> dict:
         result = json.loads(result_path.read_text(encoding="utf-8"))
     except FileNotFoundError as exc:
         raise AnalysisError(
-            "Codex did not write its structured final response"
+            "Claude did not write its structured final response"
         ) from exc
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise AnalysisError(
-            f"could not read Codex's structured response: {exc}"
+            f"could not read Claude's structured response: {exc}"
         ) from exc
 
     if not isinstance(result, dict):
-        raise AnalysisError("Codex's structured response is not a JSON object")
+        raise AnalysisError("Claude's structured response is not a JSON object")
     if result.get("status") not in {"complete", "partial"}:
-        raise AnalysisError("Codex's structured response has an invalid status")
+        raise AnalysisError("Claude's structured response has an invalid status")
     paper_title = result.get("paper_title")
     if not isinstance(paper_title, str) or not paper_title.strip():
-        raise AnalysisError("Codex's structured response has no paper title")
+        raise AnalysisError("Claude's structured response has no paper title")
     paper_authors = result.get("paper_authors")
     if not valid_paper_authors(paper_authors):
         raise AnalysisError(
-            "Codex's structured response has invalid paper authors"
+            "Claude's structured response has invalid paper authors"
         )
     if not isinstance(result.get("warnings"), list) or not all(
         isinstance(item, str) for item in result["warnings"]
     ):
-        raise AnalysisError("Codex's structured response has invalid warnings")
+        raise AnalysisError("Claude's structured response has invalid warnings")
 
     problems = result.get("open_problems")
     if not isinstance(problems, list):
-        raise AnalysisError("Codex's structured response has no open-problem list")
+        raise AnalysisError("Claude's structured response has no open-problem list")
 
     problem_ids: set[str] = set()
     for problem in problems:
@@ -291,13 +286,13 @@ def validate_agent_result(result_path: Path, workspace: Path) -> dict:
         try:
             contents = path.read_text(encoding="utf-8")
         except FileNotFoundError as exc:
-            raise AnalysisError(f"Codex did not create {filename}") from exc
+            raise AnalysisError(f"Claude did not create {filename}") from exc
         except (OSError, UnicodeError) as exc:
             raise AnalysisError(
                 f"could not read generated {filename}: {exc}"
             ) from exc
         if not contents.strip():
-            raise AnalysisError(f"Codex created an empty {filename}")
+            raise AnalysisError(f"Claude created an empty {filename}")
         if not contents.lstrip().startswith("#"):
             raise AnalysisError(
                 f"generated {filename} does not start with a heading"
@@ -318,22 +313,18 @@ def build_manifest(
     *,
     paper_digest: str,
     config_digest: str | None,
-    codex_version: str,
-    model: str | None,
-    reasoning_effort: str | None,
-    fast: bool,
-    ultrafast: bool = False,
+    claude_version: str,
+    options: claude_cli.ModelOptions | None,
 ) -> dict:
     return {
         "schema_version": MANIFEST_SCHEMA_VERSION,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "source_digest": paper_digest,
         "analysis_config_digest": config_digest,
-        "codex_version": codex_version,
-        "requested_fast_mode": fast,
-        "requested_service_tier": codex_cli.ModelOptions(fast=fast, ultrafast=ultrafast).service_tier,
-        "requested_model": model,
-        "requested_reasoning_effort": reasoning_effort,
+        "claude_version": claude_version,
+        "requested_model": options.model if options else None,
+        "requested_reasoning_effort": options.reasoning_effort if options else None,
+        "requested_max_budget_usd": options.max_budget_usd if options else None,
         "status": agent_result["status"],
         "paper_title": agent_result["paper_title"],
         "paper_authors": agent_result["paper_authors"],
@@ -347,19 +338,8 @@ def build_manifest(
     }
 
 
-is_windows_host = codex_cli.is_windows_host
-path_for_codex = codex_cli.path_for_codex
-windows_identity = codex_cli.windows_identity
-windows_icacls = codex_cli.windows_icacls
-windows_icacls_for_sandbox = codex_cli.windows_icacls_for_sandbox
-grant_workspace_owner_inheritance = (
-    codex_cli.grant_workspace_owner_inheritance
-)
-grant_staged_paper_read_access = codex_cli.grant_sandbox_read_access
-
-
 def stage_paper_inputs(paper_directory: Path, workspace: Path) -> Path:
-    """Copy primary inputs into the sandbox without copying restrictive ACLs."""
+    """Copy primary inputs into the workspace, the only tree Claude may read."""
     staged_paper = workspace / STAGED_PAPER_DIRECTORY
     staged_paper.mkdir()
 
@@ -381,47 +361,32 @@ def stage_paper_inputs(paper_directory: Path, workspace: Path) -> Path:
     metadata = paper_directory / "metadata.json"
     if metadata.is_file():
         shutil.copyfile(metadata, staged_paper / "metadata.json")
-
-    grant_staged_paper_read_access(staged_paper)
     return staged_paper
 
 
 def render_prompt(template: str, paper_directory: Path) -> str:
-    return template.replace(
-        "{{PAPER_DIRECTORY}}",
-        path_for_codex(paper_directory),
-    )
+    return template.replace("{{PAPER_DIRECTORY}}", str(paper_directory))
 
 
 def analyze_paper(
     paper_directory: Path,
     *,
-    codex: str,
-    codex_version: str,
+    claude: str,
+    claude_version: str,
     prompt_template: str,
     schema_path: Path,
     schema_text: str,
-    model: str | None = None,
-    reasoning_effort: str | None = None,
-    fast: bool = False,
-    ultrafast: bool = False,
+    options: claude_cli.ModelOptions = claude_cli.DEFAULT_MODEL_OPTIONS,
     force: bool = False,
-    launch_interval: float = CODEX_LAUNCH_INTERVAL_SECONDS,
+    launch_interval: float = AGENT_LAUNCH_INTERVAL_SECONDS,
 ) -> AnalysisOutcome:
-    """Run Codex for one paper and atomically install validated artifacts."""
+    """Run Claude for one paper and atomically install validated artifacts."""
     paper_directory = paper_directory.resolve()
     analysis_directory = paper_directory / ANALYSIS_DIRECTORY
     analysis_directory.mkdir(parents=True, exist_ok=True)
 
     paper_digest = source_digest(paper_directory)
-    config_digest = analysis_config_digest(
-        prompt_template,
-        schema_text,
-        model,
-        reasoning_effort,
-        fast,
-        ultrafast,
-    )
+    config_digest = analysis_config_digest(prompt_template, schema_text, options)
     if not force and analysis_is_current(
         analysis_directory,
         paper_digest=paper_digest,
@@ -444,38 +409,30 @@ def analyze_paper(
     ).resolve()
     staged_paper = stage_paper_inputs(paper_directory, workspace)
     prompt = render_prompt(prompt_template, staged_paper)
-    report = codex_cli.run_validated_codex(
-        codex=codex,
+    report = claude_cli.run_validated_agent(
+        claude=claude,
         workspace=workspace,
         prompt=prompt,
         schema_path=schema_path,
-        validator=codex_cli.OutputValidator(
+        validator=claude_cli.OutputValidator(
             Path(analysis_validation.__file__).resolve(),
             analysis_validation.validate,
             {},
         ),
-        options=codex_cli.ModelOptions(
-            model,
-            reasoning_effort,
-            fast,
-            ultrafast,
-        ),
+        options=options,
         launch_interval=launch_interval,
     )
 
     try:
-        agent_result = codex_cli.validated_result(report)
+        agent_result = claude_cli.validated_result(report)
         results = result_count(workspace)
         open_problems = len(agent_result["open_problems"])
         manifest = build_manifest(
             agent_result,
             paper_digest=paper_digest,
             config_digest=config_digest,
-            codex_version=codex_version,
-            model=model,
-            reasoning_effort=reasoning_effort,
-            fast=fast,
-            ultrafast=ultrafast,
+            claude_version=claude_version,
+            options=options,
         )
         staged_manifest = workspace / MANIFEST_FILE
         staged_manifest.write_text(
@@ -539,10 +496,6 @@ def analyze_paper(
     )
 
 
-workspace_is_user_accessible = codex_cli.workspace_is_user_accessible
-grant_recovery_access = codex_cli.normalize_workspace_access
-
-
 def find_complete_run(analysis_directory: Path) -> Path | None:
     """Return the newest preserved run whose structured status is complete."""
     candidates = sorted(
@@ -560,8 +513,7 @@ def find_complete_run(analysis_directory: Path) -> Path | None:
 def recover_complete_analysis(
     paper_directory: Path,
     *,
-    codex: str,
-    codex_version: str,
+    claude_version: str,
 ) -> AnalysisOutcome:
     """Install a preserved complete run without spending another model turn."""
     paper_directory = paper_directory.resolve()
@@ -574,7 +526,6 @@ def recover_complete_analysis(
             "no preserved run has structured status complete",
         )
 
-    grant_recovery_access(workspace, codex)
     agent_result = validate_agent_result(
         workspace / "agent-result.json",
         workspace,
@@ -585,15 +536,11 @@ def recover_complete_analysis(
         agent_result,
         paper_digest=source_digest(paper_directory),
         config_digest=None,
-        codex_version=codex_version,
-        model=None,
-        reasoning_effort=None,
-        fast=False,
+        claude_version=claude_version,
+        options=None,
     )
     manifest.update(
         {
-            "requested_fast_mode": None,
-            "requested_service_tier": None,
             "recovered_without_config": True,
             "recovered_from_run": workspace.name,
             "original_run_preserved": True,
@@ -634,19 +581,19 @@ def recover_complete_analysis(
     )
 
 
-positive_integer = codex_cli.positive_integer
-resolve_codex_executable = codex_cli.resolve_codex_executable
-read_codex_version = codex_cli.read_codex_version
+positive_integer = claude_cli.positive_integer
+resolve_agent_executable = claude_cli.resolve_agent_executable
+read_agent_version = claude_cli.read_agent_version
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "use independent Codex CLI runs to analyze installed research papers"
+            "use independent Claude Code runs to analyze installed research papers"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""examples:
-  Analyze one paper with the configured Codex defaults:
+  Analyze one paper with the configured Claude defaults:
     python src/analyze_papers.py papers/author/arXiv-1706.03762
 
   Use the current frontier model with extra-high reasoning and Fast mode:
@@ -668,7 +615,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--jobs",
         type=positive_integer,
         default=1,
-        help="maximum concurrent Codex runs (default: 1)",
+        help="maximum concurrent Claude runs (default: 1)",
     )
     parser.add_argument(
         "-f",
@@ -687,15 +634,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="validate and report the analysis plan without starting Codex",
+        help="validate and report the analysis plan without starting Claude",
     )
-    codex_cli.add_model_arguments(parser)
+    claude_cli.add_model_arguments(parser, **claude_cli.stage_model_defaults("analyze"))
     parser.add_argument(
-        "--codex",
-        default="codex",
-        help="Codex CLI executable or command name (default: codex)",
+        "--claude",
+        default="claude",
+        help="Claude Code executable or command name (default: claude)",
     )
-    codex_cli.add_prompt_arguments(
+    claude_cli.add_prompt_arguments(
         parser,
         default_template=DEFAULT_PROMPT_PATH,
         task="paper analyzer",
@@ -710,16 +657,17 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    codex_cli.configure_utf8_stdio()
+    claude_cli.configure_utf8_stdio()
     parser = build_parser()
     args = parser.parse_args(argv)
+    options = claude_cli.model_options_from_args(args)
 
     try:
         papers = discover_paper_directories(args.paths)
         prompt_path = args.prompt_template.expanduser().resolve()
         schema_path = args.schema.expanduser().resolve()
         prompt_template = prompt_path.read_text(encoding="utf-8")
-        prompt_template = codex_cli.with_user_prompt(
+        prompt_template = claude_cli.with_user_prompt(
             prompt_template,
             args.prompt,
             task="paper analyzer",
@@ -732,7 +680,7 @@ def main(argv: list[str] | None = None) -> int:
         UnicodeError,
         json.JSONDecodeError,
     ) as exc:
-        return codex_cli.report_error(parser, exc)
+        return claude_cli.report_error(parser, exc)
 
     if args.dry_run:
         failures: list[tuple[Path, str]] = []
@@ -758,14 +706,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 1 if failures else 0
 
-        config_digest = analysis_config_digest(
-            prompt_template,
-            schema_text,
-            args.model,
-            args.reasoning_effort,
-            args.fast,
-            args.ultrafast,
-        )
+        config_digest = analysis_config_digest(prompt_template, schema_text, options)
         for paper in papers:
             try:
                 paper_digest = source_digest(paper)
@@ -798,14 +739,14 @@ def main(argv: list[str] | None = None) -> int:
             + (f"; {len(failures)} failed." if failures else ".")
         )
         if selected:
-            codex_cli.report_codex_home_warnings()
+            claude_cli.report_agent_config_warnings()
         return 1 if failures else 0
 
     try:
-        codex = resolve_codex_executable(args.codex)
-        codex_version = read_codex_version(codex)
+        claude = resolve_agent_executable(args.claude)
+        claude_version = read_agent_version(claude)
     except (AnalysisError, OSError) as exc:
-        return codex_cli.report_error(parser, exc)
+        return claude_cli.report_error(parser, exc)
 
     if args.recover_complete:
         print(
@@ -815,7 +756,7 @@ def main(argv: list[str] | None = None) -> int:
     else:
         print(
             f"Found {len(papers)} paper(s); running up to "
-            f"{min(args.jobs, len(papers))} Codex agent(s) at once."
+            f"{min(args.jobs, len(papers))} Claude agent(s) at once."
         )
 
     outcomes: list[AnalysisOutcome] = []
@@ -826,8 +767,7 @@ def main(argv: list[str] | None = None) -> int:
                 executor.submit(
                     recover_complete_analysis,
                     paper,
-                    codex=codex,
-                    codex_version=codex_version,
+                    claude_version=claude_version,
                 ): paper
                 for paper in papers
             }
@@ -836,15 +776,12 @@ def main(argv: list[str] | None = None) -> int:
                 executor.submit(
                     analyze_paper,
                     paper,
-                    codex=codex,
-                    codex_version=codex_version,
+                    claude=claude,
+                    claude_version=claude_version,
                     prompt_template=prompt_template,
                     schema_path=schema_path,
                     schema_text=schema_text,
-                    model=args.model,
-                    reasoning_effort=args.reasoning_effort,
-                    fast=args.fast,
-                    ultrafast=args.ultrafast,
+                    options=options,
                     force=args.force,
                 ): paper
                 for paper in papers

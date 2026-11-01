@@ -14,7 +14,7 @@ import sys
 import tempfile
 from typing import Callable, Iterable, Sequence
 
-import codex_cli
+import claude_cli
 import open_problem_common as common
 from validation import solution_review as solution_review_validation
 
@@ -125,7 +125,7 @@ def discover_attempt_refs(
             )
             attempts.append(AttemptRef(problem, directory, result))
     if not attempts:
-        raise common.CodexError("no matching solver attempts were found")
+        raise common.AgentError("no matching solver attempts were found")
     return attempts
 
 
@@ -203,11 +203,11 @@ def render_prompt(
         )
         .replace(
             "{{ATTEMPT_DIRECTORY}}",
-            codex_cli.path_for_codex(staged_attempt),
+            str(staged_attempt),
         )
         .replace(
             "{{CONTEXT_DIRECTORY}}",
-            codex_cli.path_for_codex(context_directory),
+            str(context_directory),
         )
     )
 
@@ -221,7 +221,7 @@ def write_attempt_review_schema(
     schema = common.read_json(schema_path, description="review schema")
     claims = attempt.solver_result.get("checkable_claims")
     if not isinstance(claims, list):
-        raise common.CodexError(
+        raise common.AgentError(
             f"{attempt.directory}/solver-result.json has invalid claims"
         )
     claim_ids = [
@@ -230,14 +230,14 @@ def write_attempt_review_schema(
         if isinstance(claim, dict) and isinstance(claim.get("id"), str)
     ]
     if len(claim_ids) != len(claims) or len(set(claim_ids)) != len(claim_ids):
-        raise common.CodexError(
+        raise common.AgentError(
             f"{attempt.directory}/solver-result.json has invalid claim IDs"
         )
     try:
         reviews_schema = schema["properties"]["claim_reviews"]
         claim_id_schema = reviews_schema["items"]["properties"]["claim_id"]
     except (KeyError, TypeError) as exc:
-        raise common.CodexError(
+        raise common.AgentError(
             "review schema cannot be specialized by target claim IDs"
         ) from exc
     reviews_schema["minItems"] = len(claim_ids)
@@ -259,31 +259,31 @@ def validate_review_result(
     """Validate and normalize pre-checker review output for recovery."""
     result = common.read_json(result_path, description="review response")
     if result.get("correctness") not in CORRECTNESS_LEVELS:
-        raise common.CodexError("review response has invalid correctness")
+        raise common.AgentError("review response has invalid correctness")
     if result.get("reviewed_coverage") not in REVIEWED_COVERAGE_LEVELS:
-        raise common.CodexError("review response has invalid coverage")
+        raise common.AgentError("review response has invalid coverage")
     if result.get("importance") not in IMPORTANCE_LEVELS:
-        raise common.CodexError("review response has invalid importance")
+        raise common.AgentError("review response has invalid importance")
     if (
         result.get("verification_confidence")
         not in VERIFICATION_CONFIDENCE_LEVELS
     ):
-        raise common.CodexError(
+        raise common.AgentError(
             "review response has invalid verification confidence"
         )
     if not isinstance(result.get("summary"), str) or not result[
         "summary"
     ].strip():
-        raise common.CodexError("review response has no summary")
+        raise common.AgentError("review response has no summary")
     for field in ("blocking_gaps", "recommended_next_steps", "warnings"):
         values = result.get(field)
         if not isinstance(values, list) or not all(
             isinstance(value, str) for value in values
         ):
-            raise common.CodexError(f"review response has invalid {field}")
+            raise common.AgentError(f"review response has invalid {field}")
     expected_claims = attempt.solver_result.get("checkable_claims")
     if not isinstance(expected_claims, list):
-        raise common.CodexError(
+        raise common.AgentError(
             f"{attempt.directory}/solver-result.json has invalid claims"
         )
     expected_ids = {
@@ -292,24 +292,24 @@ def validate_review_result(
         if isinstance(claim, dict) and isinstance(claim.get("id"), str)
     }
     if len(expected_ids) != len(expected_claims):
-        raise common.CodexError(
+        raise common.AgentError(
             f"{attempt.directory}/solver-result.json has invalid claim IDs"
         )
     reviews = result.get("claim_reviews")
     if not isinstance(reviews, list):
-        raise common.CodexError("review response has no claim_reviews array")
+        raise common.AgentError("review response has no claim_reviews array")
     reviewed_ids: set[str] = set()
     accepted_reviews: list[dict] = []
     ignored_ids: list[str] = []
     for review in reviews:
         if not isinstance(review, dict):
-            raise common.CodexError("a claim review is not an object")
+            raise common.AgentError("a claim review is not an object")
         claim_id = review.get("claim_id")
         if claim_id not in expected_ids:
             ignored_ids.append(repr(claim_id))
             continue
         if claim_id in reviewed_ids:
-            raise common.CodexError(
+            raise common.AgentError(
                 f"review response has invalid or duplicate claim {claim_id!r}"
             )
         reviewed_ids.add(claim_id)
@@ -319,13 +319,13 @@ def validate_review_result(
             "unsupported",
             "incorrect",
         }:
-            raise common.CodexError(
+            raise common.AgentError(
                 f"review response has invalid assessment for {claim_id}"
             )
         if not isinstance(review.get("explanation"), str) or not review[
             "explanation"
         ].strip():
-            raise common.CodexError(
+            raise common.AgentError(
                 f"review response has no explanation for {claim_id}"
             )
         accepted_reviews.append(review)
@@ -336,7 +336,7 @@ def validate_review_result(
             if ignored_ids
             else ""
         )
-        raise common.CodexError(
+        raise common.AgentError(
             "review response omitted claims: "
             + ", ".join(sorted(missing))
             + unexpected
@@ -353,14 +353,14 @@ def validate_review_result(
         or result["reviewed_coverage"] != "none"
         or result["importance"] != "none"
     ):
-        raise common.CodexError(
+        raise common.AgentError(
             "a no-result attempt requires not_applicable correctness and "
             "none coverage/importance"
         )
     if result["importance"] == "resolution" and result[
         "reviewed_coverage"
     ] not in {"complete", "complete_under_stated_interpretation"}:
-        raise common.CodexError(
+        raise common.AgentError(
             "resolution importance requires complete coverage"
         )
     result["human_priority"] = derive_human_priority(result)
@@ -426,7 +426,7 @@ def recover_missing_critique(
     if critique_path.is_file():
         return False
     result_path = workspace / "agent-result.json"
-    if not codex_cli.structured_turn_is_complete(
+    if not claude_cli.logged_turn_is_complete(
         workspace / "events.jsonl",
         result_path,
     ):
@@ -458,15 +458,11 @@ def _install_review(
     result: dict,
     attempt_digest: str,
     config_digest: str,
-    codex_version: str,
-    options: codex_cli.ModelOptions,
+    claude_version: str,
+    options: claude_cli.ModelOptions,
     web_search: str,
     recovered_from: Path | None = None,
 ) -> None:
-    # Review installation replaces files in the solver-owned attempt after an
-    # elevated sandbox turn.  Restore owner inheritance on that destination
-    # before creating and moving the staging files.
-    codex_cli.grant_workspace_owner_inheritance(attempt.directory)
     staging = Path(
         tempfile.mkdtemp(prefix=".review-install-", dir=attempt.directory)
     )
@@ -481,11 +477,10 @@ def _install_review(
                 "generated_at": common.utc_now(),
                 "attempt_digest": attempt_digest,
                 "config_digest": config_digest,
-                "codex_version": codex_version,
+                "claude_version": claude_version,
                 "requested_model": options.model,
                 "requested_reasoning_effort": options.reasoning_effort,
-                "requested_fast_mode": options.fast,
-                "requested_service_tier": options.service_tier,
+                "requested_max_budget_usd": options.max_budget_usd,
                 "requested_web_search": web_search,
                 "correctness": result["correctness"],
                 "reviewed_coverage": result["reviewed_coverage"],
@@ -521,7 +516,7 @@ def _install_review(
         ):
             os.replace(staging / name, attempt.directory / name)
     except OSError as exc:
-        raise common.CodexError(
+        raise common.AgentError(
             f"could not install review; staging preserved at {staging}: {exc}"
         ) from exc
     shutil.rmtree(staging)
@@ -536,8 +531,8 @@ def _write_work_record(
     *,
     attempt_digest: str,
     config_digest: str,
-    codex_version: str,
-    options: codex_cli.ModelOptions,
+    claude_version: str,
+    options: claude_cli.ModelOptions,
     web_search: str,
 ) -> None:
     common.write_json(
@@ -548,11 +543,10 @@ def _write_work_record(
             "attempt_name": attempt.name,
             "attempt_digest": attempt_digest,
             "config_digest": config_digest,
-            "codex_version": codex_version,
+            "claude_version": claude_version,
             "requested_model": options.model,
             "requested_reasoning_effort": options.reasoning_effort,
-            "requested_fast_mode": options.fast,
-            "requested_service_tier": options.service_tier,
+            "requested_max_budget_usd": options.max_budget_usd,
             "requested_web_search": web_search,
         },
     )
@@ -561,10 +555,10 @@ def _write_work_record(
 def recover_review(
     attempt: AttemptRef,
     *,
-    codex: str,
-    codex_version: str,
+    claude: str,
+    claude_version: str,
     config_digest: str,
-    options: codex_cli.ModelOptions,
+    options: claude_cli.ModelOptions,
     web_search: str,
 ) -> ReviewOutcome | None:
     """Install a matching completed review workspace without another turn."""
@@ -585,7 +579,6 @@ def recover_review(
             and record.get("config_digest") == config_digest
         ):
             continue
-        codex_cli.normalize_workspace_access(workspace, codex)
         if not all(
             (workspace / name).is_file()
             for name in (
@@ -609,7 +602,7 @@ def recover_review(
             result=result,
             attempt_digest=attempt_digest,
             config_digest=config_digest,
-            codex_version=record.get("codex_version", codex_version),
+            claude_version=record.get("claude_version", claude_version),
             options=options,
             web_search=record.get("requested_web_search", web_search),
             recovered_from=workspace,
@@ -632,14 +625,14 @@ def recover_review(
 def review_attempt(
     attempt: AttemptRef,
     *,
-    codex: str,
-    codex_version: str,
+    claude: str,
+    claude_version: str,
     prompt_template: str,
     schema_path: Path,
     config_digest: str,
-    options: codex_cli.ModelOptions,
+    options: claude_cli.ModelOptions,
     web_search: str = "live",
-    launch_interval: float = codex_cli.CODEX_LAUNCH_INTERVAL_SECONDS,
+    launch_interval: float = claude_cli.AGENT_LAUNCH_INTERVAL_SECONDS,
     timeout_seconds: float = DEFAULT_TIMEOUT_MINUTES * 60,
     allow_recovery: bool = True,
 ) -> ReviewOutcome:
@@ -647,8 +640,8 @@ def review_attempt(
     if allow_recovery:
         recovered = recover_review(
             attempt,
-            codex=codex,
-            codex_version=codex_version,
+            claude=claude,
+            claude_version=claude_version,
             config_digest=config_digest,
             options=options,
             web_search=web_search,
@@ -665,7 +658,7 @@ def review_attempt(
             attempt,
             attempt_digest=attempt_digest,
             config_digest=config_digest,
-            codex_version=codex_version,
+            claude_version=claude_version,
             options=options,
             web_search=web_search,
         )
@@ -695,12 +688,12 @@ def review_attempt(
                 attempt.solver_result
             ),
         }
-        report = codex_cli.run_validated_codex(
-            codex=codex,
+        report = claude_cli.run_validated_agent(
+            claude=claude,
             workspace=workspace,
             prompt=prompt,
             schema_path=attempt_schema_path,
-            validator=codex_cli.OutputValidator(
+            validator=claude_cli.OutputValidator(
                 Path(solution_review_validation.__file__).resolve(),
                 solution_review_validation.validate,
                 expectations,
@@ -711,7 +704,7 @@ def review_attempt(
             timeout_seconds=timeout_seconds,
             completion_grace_seconds=COMPLETION_GRACE_SECONDS,
         )
-        result = codex_cli.validated_result(report)
+        result = claude_cli.validated_result(report)
         result["human_priority"] = derive_human_priority(result)
         _install_review(
             attempt,
@@ -719,12 +712,12 @@ def review_attempt(
             result=result,
             attempt_digest=attempt_digest,
             config_digest=config_digest,
-            codex_version=codex_version,
+            claude_version=claude_version,
             options=options,
             web_search=web_search,
         )
-    except (common.CodexError, OSError) as exc:
-        raise common.CodexError(
+    except (common.AgentError, OSError) as exc:
+        raise common.AgentError(
             common.preserved_workspace_message(exc, workspace)
         ) from exc
     warning = common.cleanup_workspace(
@@ -752,12 +745,12 @@ def review_attempt(
 def review_many(
     attempts: Sequence[AttemptRef],
     *,
-    codex: str,
-    codex_version: str,
+    claude: str,
+    claude_version: str,
     prompt_template: str,
     schema_path: Path,
     config_digest: str,
-    options: codex_cli.ModelOptions,
+    options: claude_cli.ModelOptions,
     jobs: int,
     web_search: str = "live",
     timeout_seconds: float = DEFAULT_TIMEOUT_MINUTES * 60,
@@ -773,8 +766,8 @@ def review_many(
             executor.submit(
                 review_attempt,
                 attempt,
-                codex=codex,
-                codex_version=codex_version,
+                claude=claude,
+                claude_version=claude_version,
                 prompt_template=prompt_template,
                 schema_path=schema_path,
                 config_digest=config_digest,
@@ -789,7 +782,7 @@ def review_many(
             attempt = future_to_attempt[future]
             try:
                 outcome = future.result()
-            except (common.CodexError, OSError) as exc:
+            except (common.AgentError, OSError) as exc:
                 message = str(exc)
                 failures.append((attempt, message))
                 if on_finished is not None:
@@ -856,7 +849,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "-j",
         "--jobs",
-        type=codex_cli.positive_integer,
+        type=claude_cli.positive_integer,
         default=1,
         help="maximum concurrent review agents (default: 1)",
     )
@@ -868,7 +861,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--timeout-minutes",
-        type=codex_cli.positive_number,
+        type=claude_cli.positive_number,
         default=DEFAULT_TIMEOUT_MINUTES,
         metavar="MINUTES",
         help=(
@@ -879,14 +872,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="report pending reviews without starting Codex",
+        help="report pending reviews without starting Claude",
     )
     parser.add_argument(
-        "--codex",
-        default="codex",
-        help="Codex CLI executable or command name (default: codex)",
+        "--claude",
+        default="claude",
+        help="Claude Code executable or command name (default: claude)",
     )
-    codex_cli.add_prompt_arguments(
+    claude_cli.add_prompt_arguments(
         parser,
         default_template=DEFAULT_PROMPT_PATH,
         task="solution critic",
@@ -897,13 +890,13 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_SCHEMA_PATH,
         help=f"agent-result JSON schema (default: {DEFAULT_SCHEMA_PATH})",
     )
-    codex_cli.add_model_arguments(parser)
-    codex_cli.add_web_search_argument(parser, default="live")
+    claude_cli.add_model_arguments(parser, **claude_cli.stage_model_defaults("review"))
+    claude_cli.add_web_search_argument(parser, default="live")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
-    codex_cli.configure_utf8_stdio()
+    claude_cli.configure_utf8_stdio()
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
@@ -916,11 +909,11 @@ def main(argv: list[str] | None = None) -> int:
             for paper, problem_id, _attempt_name in exact_attempts
         )
         if direct_problem_selectors and args.problem_ids:
-            raise common.CodexError(
+            raise common.AgentError(
                 "direct problem paths cannot be combined with --problem"
             )
         if exact_attempts and args.attempt_names:
-            raise common.CodexError(
+            raise common.AgentError(
                 "direct attempt paths cannot be combined with --attempt"
             )
         problems = common.discover_problem_refs(
@@ -959,21 +952,21 @@ def main(argv: list[str] | None = None) -> int:
                 )
             ]
             if not attempts:
-                raise common.CodexError(
+                raise common.AgentError(
                     "no solver attempts matched the direct paths"
                 )
         prompt_path = args.prompt_template.expanduser().resolve()
         schema_path = args.schema.expanduser().resolve()
         prompt_template = prompt_path.read_text(encoding="utf-8")
-        prompt_template = codex_cli.with_user_prompt(
+        prompt_template = claude_cli.with_user_prompt(
             prompt_template,
             args.prompt,
             task="solution critic",
         )
         schema_text = schema_path.read_text(encoding="utf-8")
         json.loads(schema_text)
-        options = codex_cli.model_options_from_args(args)
-        config_digest = codex_cli.semantic_config_digest(
+        options = claude_cli.model_options_from_args(args)
+        config_digest = claude_cli.semantic_config_digest(
             prompt_template,
             schema_text,
             options,
@@ -983,12 +976,12 @@ def main(argv: list[str] | None = None) -> int:
             ).resolve(),
         )
     except (
-        common.CodexError,
+        common.AgentError,
         OSError,
         UnicodeError,
         json.JSONDecodeError,
     ) as exc:
-        return codex_cli.report_error(parser, exc)
+        return claude_cli.report_error(parser, exc)
 
     eligible = [
         attempt
@@ -1023,7 +1016,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.dry_run:
         if pending:
-            codex_cli.report_codex_home_warnings()
+            claude_cli.report_agent_config_warnings()
         for attempt in pending:
             print(
                 f"Would review: {attempt.problem.paper_directory} "
@@ -1037,13 +1030,13 @@ def main(argv: list[str] | None = None) -> int:
 
     if pending:
         try:
-            codex = codex_cli.resolve_codex_executable(args.codex)
-            codex_version = codex_cli.read_codex_version(codex)
-        except common.CodexError as exc:
-            return codex_cli.report_error(parser, exc)
+            claude = claude_cli.resolve_agent_executable(args.claude)
+            claude_version = claude_cli.read_agent_version(claude)
+        except common.AgentError as exc:
+            return claude_cli.report_error(parser, exc)
         print(
             f"Reviewing {len(pending)} attempt(s), with up to "
-            f"{min(args.jobs, len(pending))} Codex critic(s) at once."
+            f"{min(args.jobs, len(pending))} Claude critic(s) at once."
         )
         finished_count = 0
 
@@ -1074,8 +1067,8 @@ def main(argv: list[str] | None = None) -> int:
 
         outcomes, failures = review_many(
             pending,
-            codex=codex,
-            codex_version=codex_version,
+            claude=claude,
+            claude_version=claude_version,
             prompt_template=prompt_template,
             schema_path=schema_path,
             config_digest=config_digest,

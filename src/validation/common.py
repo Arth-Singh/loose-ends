@@ -278,7 +278,7 @@ def run_agent_validation(
     *,
     validation_directory: Path,
 ) -> int:
-    """Run a staged validator for a Codex agent with no CLI arguments."""
+    """Run a staged validator for a Claude agent with no CLI arguments."""
     reporter = Reporter()
     expectations = read_json_object(
         validation_directory / EXPECTATIONS_FILENAME,

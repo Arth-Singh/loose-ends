@@ -224,7 +224,7 @@ class WorkbenchStore:
                 for row in connection.execute("PRAGMA table_info(scheduler_settings)")
             }
             scheduler_migrations = {
-                "codex_credit_error": "TEXT",
+                "quota_error": "TEXT",
                 "memory_limit_mode": "TEXT NOT NULL DEFAULT 'percent'",
                 "memory_limit_value": "REAL NOT NULL DEFAULT 50",
                 "memory_limit_pending": "INTEGER NOT NULL DEFAULT 0",
@@ -551,15 +551,15 @@ class WorkbenchStore:
             "queuePaused": bool(row["queue_paused"] or row["memory_limit_pending"]),
             "queueManuallyPaused": bool(row["queue_paused"]),
             "queuePauseReason": (
-                "codex_credits"
-                if row["queue_paused"] and row["codex_credit_error"]
+                "quota"
+                if row["queue_paused"] and row["quota_error"]
                 else "manual"
                 if row["queue_paused"]
                 else "memory_limit_pending"
                 if row["memory_limit_pending"]
                 else None
             ),
-            "codexCreditError": row["codex_credit_error"],
+            "quotaError": row["quota_error"],
             "memoryLimit": {
                 "mode": row["memory_limit_mode"],
                 "value": (
@@ -573,12 +573,12 @@ class WorkbenchStore:
             "updatedAt": float(row["updated_at"]),
         }
 
-    def pause_for_codex_credits(self, message: str) -> None:
-        """Stop new starts until the user resumes after replenishing credits."""
+    def pause_for_quota(self, message: str) -> None:
+        """Stop new starts until the user resumes after the usage limit resets."""
         with self.connect() as connection:
             connection.execute(
                 "UPDATE scheduler_settings SET queue_paused = 1, "
-                "codex_credit_error = ?, updated_at = ? WHERE id = 1",
+                "quota_error = ?, updated_at = ? WHERE id = 1",
                 (message, time.time()),
             )
 
@@ -609,7 +609,7 @@ class WorkbenchStore:
                 raise ValueError("queuePaused must be true or false")
             assignments.append("queue_paused = ?")
             parameters.append(int(queue_paused))
-            assignments.append("codex_credit_error = NULL")
+            assignments.append("quota_error = NULL")
         if memory_limit is not None:
             if not isinstance(memory_limit, dict):
                 raise ValueError("memoryLimit must be an object")

@@ -16,7 +16,7 @@ import support
 support.use_resolved_temp_root()
 
 import analyze_papers
-import codex_cli
+import claude_cli
 from analyze_papers import (
     AnalysisError,
     analyze_paper,
@@ -42,14 +42,66 @@ def make_paper(root: Path, name: str = "arXiv-1706.03762") -> Path:
     return paper
 
 
-def successful_codex_run(
-    commands: list[list[str]],
+def write_analysis_outputs(workspace: Path) -> None:
+    (workspace / "summary.md").write_text(
+        "# Summary\n\nA summary.\n",
+        encoding="utf-8",
+    )
+    (workspace / "results.md").write_text(
+        "# Results\n\n## R-001\n\nA result.\n",
+        encoding="utf-8",
+    )
+    (workspace / "open-problems.md").write_text(
+        "# Open Problems\n\n## OP-001: A question\n\nUnresolved.\n",
+        encoding="utf-8",
+    )
+    (workspace / "agent-result.json").write_text(
+        json.dumps(
+            {
+                "status": "complete",
+                "paper_title": "Test Paper",
+                "paper_authors": ["Ada Lovelace", "Alan Turing"],
+                "open_problems": [
+                    {
+                        "id": "OP-001",
+                        "title": "A question",
+                        "explicitness": "explicit",
+                    }
+                ],
+                "warnings": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def claude_events(session_id: str = "s1") -> str:
+    events = (
+        {
+            "type": "system",
+            "subtype": "init",
+            "session_id": session_id,
+            "model": claude_cli.DEFAULT_MODEL,
+        },
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "session_id": session_id,
+            "total_cost_usd": 0.01,
+            "usage": {"input_tokens": 10, "output_tokens": 5},
+        },
+    )
+    return "".join(json.dumps(event) + "\n" for event in events)
+
+
+def successful_agent_process(
+    calls: list[dict],
     *,
     require_staged_inputs: bool = True,
 ):
-    def run(command, **kwargs):
-        commands.append(command)
-        workspace = Path(kwargs["cwd"])
+    def run(command, *, prompt, workspace, events, is_complete, **kwargs):
+        calls.append({"command": command, "prompt": prompt, "workspace": workspace})
         staged_paper = workspace / analyze_papers.STAGED_PAPER_DIRECTORY
         if (
             require_staged_inputs
@@ -61,40 +113,18 @@ def successful_codex_run(
             and not (staged_paper / "source" / "main.tex").is_file()
         ):
             raise AssertionError("source/main.tex was not staged inside the workspace")
-        (workspace / "summary.md").write_text(
-            "# Summary\n\nA summary.\n",
-            encoding="utf-8",
-        )
-        (workspace / "results.md").write_text(
-            "# Results\n\n## R-001\n\nA result.\n",
-            encoding="utf-8",
-        )
-        (workspace / "open-problems.md").write_text(
-            "# Open Problems\n\n## OP-001: A question\n\nUnresolved.\n",
-            encoding="utf-8",
-        )
-        result_path = workspace / "agent-result.json"
-        result_path.write_text(
-            json.dumps(
-                {
-                    "status": "complete",
-                    "paper_title": "Test Paper",
-                    "paper_authors": ["Ada Lovelace", "Alan Turing"],
-                    "open_problems": [
-                        {
-                            "id": "OP-001",
-                            "title": "A question",
-                            "explicitness": "explicit",
-                        }
-                    ],
-                    "warnings": [],
-                }
-            ),
-            encoding="utf-8",
-        )
-        return subprocess.CompletedProcess(command, 0)
+        write_analysis_outputs(workspace)
+        events.write(claude_events())
+        events.flush()
+        if not is_complete():
+            raise AssertionError("the runner did not detect the completed turn")
+        return subprocess.CompletedProcess(command, 0), False, False
 
     return run
+
+
+def failed_agent_process(command, **kwargs):
+    return subprocess.CompletedProcess(command, 2), False, False
 
 
 class PaperDiscoveryTests(unittest.TestCase):
@@ -141,85 +171,18 @@ class PaperDigestTests(unittest.TestCase):
             self.assertNotEqual(source_digest(paper), initial)
 
 
-class CodexPathTests(unittest.TestCase):
-    @unittest.skipUnless(sys.platform == "cygwin", "requires Cygwin Python")
-    def test_converts_cygwin_path_for_windows_codex(self):
-        converted = analyze_papers.path_for_codex(Path.cwd())
-
-        self.assertRegex(converted, r"^[A-Za-z]:\\")
-        self.assertNotIn("/cygdrive/", converted)
-
-    def test_codex_environment_omits_windows_store_command_aliases(self):
-        separator = codex_cli.os.pathsep
-        if separator == ";":
-            keep = (r"C:\Tools", r"C:\Windows\System32")
-            windows_apps = (
-                r"C:\Users\tester\AppData\Local\Microsoft\WindowsApps"
-            )
-        else:
-            keep = ("/usr/bin", "/cygdrive/c/Windows/System32")
-            windows_apps = (
-                "/cygdrive/c/Users/tester/AppData/Local/"
-                "Microsoft/WindowsApps"
-            )
-        original = separator.join((keep[0], windows_apps, keep[1]))
-        with (
-            patch.object(codex_cli, "is_windows_host", return_value=True),
-            patch.dict(codex_cli.os.environ, {"PATH": original}),
-        ):
-            environment = codex_cli.codex_subprocess_environment()
-            self.assertEqual(codex_cli.os.environ["PATH"], original)
-
-        self.assertEqual(
-            environment["PATH"],
-            separator.join(keep),
-        )
-
-    def test_acl_repair_removes_explicit_deny_before_granting_access(self):
-        with (
-            TemporaryDirectory() as temporary,
-            patch.object(codex_cli, "is_windows_host", return_value=True),
-            patch.object(
-                codex_cli,
-                "workspace_is_user_accessible",
-                side_effect=[False, True],
-            ),
-            patch.object(
-                codex_cli,
-                "windows_identity",
-                return_value=r"DOMAIN\user",
-            ),
-            patch.object(
-                codex_cli,
-                "windows_icacls_for_sandbox",
-                return_value="icacls.exe",
-            ),
-            patch.object(codex_cli, "_run_local_command") as run_local,
-        ):
-            workspace = Path(temporary)
-            codex_cli.normalize_workspace_access(workspace, "codex")
-
-        self.assertEqual(run_local.call_count, 2)
-        remove_command = run_local.call_args_list[0].args[0]
-        grant_command = run_local.call_args_list[1].args[0]
-        self.assertIn("/remove:d", remove_command)
-        self.assertIn(r"DOMAIN\user", remove_command)
-        self.assertIn("/grant", grant_command)
-        self.assertIn(r"DOMAIN\user:(OI)(CI)(F)", grant_command)
-
-
 class AnalyzePaperTests(unittest.TestCase):
-    @patch.object(analyze_papers.subprocess, "run")
+    @patch.object(claude_cli, "_run_agent_process")
     def test_writes_three_markdown_files_and_manifest(self, run):
         with TemporaryDirectory() as temporary:
             paper = make_paper(Path(temporary))
-            commands: list[list[str]] = []
-            run.side_effect = successful_codex_run(commands)
+            calls: list[dict] = []
+            run.side_effect = successful_agent_process(calls)
 
             outcome = analyze_paper(
                 paper,
-                codex="codex",
-                codex_version="codex-cli test",
+                claude="claude",
+                claude_version="claude-cli test",
                 prompt_template=PROMPT_TEMPLATE,
                 schema_path=analyze_papers.DEFAULT_SCHEMA_PATH,
                 schema_text=SCHEMA_TEXT,
@@ -246,85 +209,98 @@ class AnalyzePaperTests(unittest.TestCase):
                 ["Ada Lovelace", "Alan Turing"],
             )
             self.assertEqual(manifest["open_problems"][0]["id"], "OP-001")
-            self.assertEqual(manifest["codex_version"], "codex-cli test")
-            self.assertFalse(manifest["requested_fast_mode"])
+            self.assertEqual(manifest["claude_version"], "claude-cli test")
+            self.assertIsNone(manifest["requested_model"])
             self.assertIsNone(manifest["requested_reasoning_effort"])
+            self.assertIsNone(manifest["requested_max_budget_usd"])
 
-            command = next(
-                candidate
-                for candidate in commands
-                if len(candidate) > 1 and candidate[1] == "exec"
+            self.assertEqual(len(calls), 1)
+            call = calls[0]
+            command = call["command"]
+            self.assertEqual(command[0], "claude")
+            self.assertEqual(call["workspace"].parent, analysis)
+            self.assertTrue(call["workspace"].name.startswith(".run-"))
+            self.assertIn("--print", command)
+            self.assertIn("--safe-mode", command)
+            self.assertIn("--strict-mcp-config", command)
+            self.assertIn("--no-session-persistence", command)
+            self.assertIn("--output-format=stream-json", command)
+            self.assertIn("--permission-mode=acceptEdits", command)
+            settings = json.loads(
+                next(
+                    argument.removeprefix("--settings=")
+                    for argument in command
+                    if argument.startswith("--settings=")
+                )
             )
-            codex_call = next(
-                call
-                for call in run.call_args_list
-                if len(call.args[0]) > 1 and call.args[0][1] == "exec"
+            self.assertTrue(settings["sandbox"]["enabled"])
+            self.assertEqual(settings["sandbox"]["network"]["allowedDomains"], [])
+            tools = next(
+                argument.removeprefix("--tools=").split(",")
+                for argument in command
+                if argument.startswith("--tools=")
             )
-            self.assertIn("--ephemeral", command)
-            self.assertIn("--ignore-user-config", command)
-            self.assertIn("shell_snapshot", command)
-            self.assertIn("skill_mcp_dependency_install", command)
-            self.assertIn('web_search="disabled"', command)
-            self.assertIn("apps._default.enabled=false", command)
-            self.assertIn("agents.enabled=false", command)
+            self.assertNotIn("WebSearch", tools)
+            self.assertNotIn("WebFetch", tools)
+            self.assertFalse(
+                any(argument.startswith("--json-schema") for argument in command)
+            )
+            self.assertFalse(
+                any(argument.startswith("--add-dir") for argument in command)
+            )
+            self.assertFalse(
+                any(argument.startswith("--model") for argument in command)
+            )
             self.assertIn(
-                "sandbox_workspace_write.network_access=false",
-                command,
+                str(call["workspace"] / analyze_papers.STAGED_PAPER_DIRECTORY),
+                call["prompt"],
             )
-            self.assertIn('windows.sandbox="elevated"', command)
-            self.assertIn("--json", command)
-            self.assertIn("workspace-write", command)
-            self.assertNotIn("--add-dir", command)
-            self.assertEqual(command[-1], "-")
-            self.assertEqual(codex_call.kwargs["encoding"], "utf-8")
-            self.assertIn(
-                analyze_papers.STAGED_PAPER_DIRECTORY,
-                codex_call.kwargs["input"],
-            )
+            self.assertIn("-m validation.validate", call["prompt"])
 
-    @patch.object(analyze_papers.subprocess, "run")
-    def test_passes_model_and_reasoning_effort_to_codex(self, run):
+    @patch.object(claude_cli, "_run_agent_process")
+    def test_passes_model_reasoning_effort_and_budget_to_claude(self, run):
         with TemporaryDirectory() as temporary:
             paper = make_paper(Path(temporary))
-            commands: list[list[str]] = []
-            run.side_effect = successful_codex_run(commands)
+            calls: list[dict] = []
+            run.side_effect = successful_agent_process(calls)
 
             analyze_paper(
                 paper,
-                codex="codex",
-                codex_version="codex-cli test",
+                claude="claude",
+                claude_version="claude-cli test",
                 prompt_template=PROMPT_TEMPLATE,
                 schema_path=analyze_papers.DEFAULT_SCHEMA_PATH,
                 schema_text=SCHEMA_TEXT,
-                model="gpt-5.6-sol",
-                reasoning_effort="xhigh",
-                fast=True,
+                options=claude_cli.ModelOptions(
+                    model=claude_cli.DEFAULT_MODEL,
+                    reasoning_effort="xhigh",
+                    max_budget_usd=2.5,
+                ),
                 launch_interval=0,
             )
 
-            command = commands[0]
-            self.assertIn("gpt-5.6-sol", command)
-            self.assertIn('model_reasoning_effort="xhigh"', command)
-            self.assertIn("features.fast_mode=true", command)
-            self.assertIn('service_tier="fast"', command)
+            command = calls[0]["command"]
+            self.assertIn(f"--model={claude_cli.DEFAULT_MODEL}", command)
+            self.assertIn("--effort=xhigh", command)
+            self.assertIn("--max-budget-usd=2.5", command)
             manifest = json.loads(
                 (paper / "analysis" / "manifest.json").read_text(
                     encoding="utf-8"
                 )
             )
-            self.assertEqual(manifest["requested_model"], "gpt-5.6-sol")
+            self.assertEqual(manifest["requested_model"], claude_cli.DEFAULT_MODEL)
             self.assertEqual(manifest["requested_reasoning_effort"], "xhigh")
-            self.assertTrue(manifest["requested_fast_mode"])
+            self.assertEqual(manifest["requested_max_budget_usd"], 2.5)
 
-    @patch.object(analyze_papers.subprocess, "run")
+    @patch.object(claude_cli, "_run_agent_process")
     def test_skips_a_current_analysis_and_reruns_after_source_change(self, run):
         with TemporaryDirectory() as temporary:
             paper = make_paper(Path(temporary))
-            commands: list[list[str]] = []
-            run.side_effect = successful_codex_run(commands)
+            calls: list[dict] = []
+            run.side_effect = successful_agent_process(calls)
             arguments = {
-                "codex": "codex",
-                "codex_version": "codex-cli test",
+                "claude": "claude",
+                "claude_version": "claude-cli test",
                 "prompt_template": PROMPT_TEMPLATE,
                 "schema_path": analyze_papers.DEFAULT_SCHEMA_PATH,
                 "schema_text": SCHEMA_TEXT,
@@ -347,15 +323,15 @@ class AnalyzePaperTests(unittest.TestCase):
             self.assertEqual(third.status, "analyzed")
             self.assertEqual(run.call_count, 2)
 
-    @patch.object(analyze_papers.subprocess, "run")
+    @patch.object(claude_cli, "_run_agent_process")
     def test_failed_rerun_preserves_the_previous_analysis(self, run):
         with TemporaryDirectory() as temporary:
             paper = make_paper(Path(temporary))
-            commands: list[list[str]] = []
-            run.side_effect = successful_codex_run(commands)
+            calls: list[dict] = []
+            run.side_effect = successful_agent_process(calls)
             arguments = {
-                "codex": "codex",
-                "codex_version": "codex-cli test",
+                "claude": "claude",
+                "claude_version": "claude-cli test",
                 "prompt_template": PROMPT_TEMPLATE,
                 "schema_path": analyze_papers.DEFAULT_SCHEMA_PATH,
                 "schema_text": SCHEMA_TEXT,
@@ -373,11 +349,8 @@ class AnalyzePaperTests(unittest.TestCase):
                 "changed",
                 encoding="utf-8",
             )
-            run.side_effect = lambda command, **kwargs: subprocess.CompletedProcess(
-                command,
-                2,
-            )
-            with self.assertRaises(AnalysisError):
+            run.side_effect = failed_agent_process
+            with self.assertRaisesRegex(AnalysisError, "workspace preserved"):
                 analyze_paper(paper, **arguments)
 
             self.assertEqual(
@@ -392,12 +365,12 @@ class AnalyzePaperTests(unittest.TestCase):
             )
             self.assertEqual(len(list((paper / "analysis").glob(".run-*"))), 1)
 
-    @patch.object(analyze_papers.subprocess, "run")
+    @patch.object(claude_cli, "_run_agent_process")
     def test_cleanup_failure_does_not_reclassify_installed_analysis(self, run):
         with TemporaryDirectory() as temporary:
             paper = make_paper(Path(temporary))
-            commands: list[list[str]] = []
-            run.side_effect = successful_codex_run(commands)
+            calls: list[dict] = []
+            run.side_effect = successful_agent_process(calls)
             real_rmtree = analyze_papers.shutil.rmtree
 
             def fail_workspace_cleanup(path, *args, **kwargs):
@@ -412,8 +385,8 @@ class AnalyzePaperTests(unittest.TestCase):
             ):
                 outcome = analyze_paper(
                     paper,
-                    codex="codex",
-                    codex_version="codex-cli test",
+                    claude="claude",
+                    claude_version="claude-cli test",
                     prompt_template=PROMPT_TEMPLATE,
                     schema_path=analyze_papers.DEFAULT_SCHEMA_PATH,
                     schema_text=SCHEMA_TEXT,
@@ -431,69 +404,22 @@ class AnalyzePaperTests(unittest.TestCase):
             )
             real_rmtree(next(analysis.glob(".run-*")))
 
-    @patch.object(analyze_papers.subprocess, "run")
-    def test_retries_windows_path_failure_before_thread_start(self, run):
-        with TemporaryDirectory() as temporary:
-            paper = make_paper(Path(temporary))
-            commands: list[list[str]] = []
-            success = successful_codex_run(commands)
-            attempts = 0
-
-            def fail_once(command, **kwargs):
-                nonlocal attempts
-                attempts += 1
-                if attempts == 1:
-                    kwargs["stderr"].write(
-                        "Error: The system cannot find the path specified. "
-                        "(os error 3)\n"
-                    )
-                    kwargs["stderr"].flush()
-                    return subprocess.CompletedProcess(command, 1)
-                return success(command, **kwargs)
-
-            run.side_effect = fail_once
-            outcome = analyze_paper(
-                paper,
-                codex="codex",
-                codex_version="codex-cli test",
-                prompt_template=PROMPT_TEMPLATE,
-                schema_path=analyze_papers.DEFAULT_SCHEMA_PATH,
-                schema_text=SCHEMA_TEXT,
-                launch_interval=0,
-            )
-
-            self.assertEqual(outcome.status, "analyzed")
-            self.assertEqual(run.call_count, 2)
-            self.assertIn(
-                "startup retry 2/3",
-                (paper / "analysis" / "run.log").read_text(encoding="utf-8"),
-            )
-
-    @patch.object(analyze_papers, "grant_recovery_access")
-    def test_recovers_a_complete_run_without_removing_it(self, grant_access):
+    def test_recovers_a_complete_run_without_removing_it(self):
         with TemporaryDirectory() as temporary:
             paper = make_paper(Path(temporary))
             analysis = paper / "analysis"
             workspace = analysis / ".run-preserved"
             workspace.mkdir(parents=True)
-            commands: list[list[str]] = []
-            successful_codex_run(
-                commands,
-                require_staged_inputs=False,
-            )(
-                ["codex", "exec"],
-                cwd=workspace,
-            )
+            write_analysis_outputs(workspace)
             (workspace / "events.jsonl").write_text(
-                '{"type":"turn.completed"}\n',
+                claude_events(),
                 encoding="utf-8",
             )
             (workspace / "run.log").write_text("", encoding="utf-8")
 
             outcome = recover_complete_analysis(
                 paper,
-                codex="codex",
-                codex_version="codex-cli test",
+                claude_version="claude-cli test",
             )
 
             self.assertEqual(outcome.status, "recovered")
@@ -501,7 +427,6 @@ class AnalyzePaperTests(unittest.TestCase):
             self.assertEqual(outcome.open_problem_count, 1)
             self.assertIn("1 result, 1 open problem", outcome.message)
             self.assertTrue(workspace.is_dir())
-            grant_access.assert_called_once_with(workspace, "codex")
             manifest = json.loads(
                 (analysis / "manifest.json").read_text(encoding="utf-8")
             )
@@ -511,19 +436,24 @@ class AnalyzePaperTests(unittest.TestCase):
                 manifest["recovered_from_run"],
                 ".run-preserved",
             )
+            self.assertEqual(manifest["claude_version"], "claude-cli test")
             for filename in analyze_papers.CONTENT_FILES:
                 self.assertTrue((analysis / filename).is_file())
+            self.assertEqual(
+                (analysis / "events.jsonl").read_text(encoding="utf-8"),
+                claude_events(),
+            )
 
 
 class MainOutputTests(unittest.TestCase):
-    def test_dry_run_reports_stale_paper_without_resolving_codex(self):
+    def test_dry_run_reports_stale_paper_without_resolving_claude(self):
         with (
             TemporaryDirectory() as temporary,
             patch.object(analyze_papers, "analysis_is_current", return_value=False),
-            patch.object(analyze_papers, "resolve_codex_executable") as resolve,
+            patch.object(analyze_papers, "resolve_agent_executable") as resolve,
             patch.object(analyze_papers, "analyze_paper") as analyze,
-            patch.dict(os.environ, {"CODEX_HOME": "", "USERPROFILE": ""}),
-            patch.object(codex_cli.Path, "home", return_value=Path(temporary)),
+            patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": ""}),
+            patch.object(claude_cli.Path, "home", return_value=Path(temporary)),
         ):
             paper = make_paper(Path(temporary))
             output = StringIO()
@@ -535,8 +465,8 @@ class MainOutputTests(unittest.TestCase):
         self.assertEqual(returncode, 0)
         self.assertIn(f"Would analyze: {paper}", output.getvalue())
         self.assertIn("1 would run; 0 current", output.getvalue())
-        self.assertIn("Codex home is not an existing directory", error.getvalue())
-        self.assertIn(str(Path(temporary) / ".codex"), error.getvalue())
+        self.assertIn("Claude config directory is not an existing directory", error.getvalue())
+        self.assertIn(str(Path(temporary) / ".claude"), error.getvalue())
         resolve.assert_not_called()
         analyze.assert_not_called()
 
@@ -545,13 +475,13 @@ class MainOutputTests(unittest.TestCase):
             TemporaryDirectory() as temporary,
             patch.object(
                 analyze_papers,
-                "resolve_codex_executable",
-                return_value="codex",
+                "resolve_agent_executable",
+                return_value="claude",
             ),
             patch.object(
                 analyze_papers,
-                "read_codex_version",
-                return_value="codex-cli test",
+                "read_agent_version",
+                return_value="claude-cli test",
             ),
             patch.object(analyze_papers, "analyze_paper") as analyze,
         ):

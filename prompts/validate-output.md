@@ -7,7 +7,7 @@ pass the task-specific checks in `validation/validate.py`.
 Before finishing, validate your output via the following command:
 
 ```text
-python -m validation.validate
+{{PYTHON}} -m validation.validate
 ```
 
 Fix every reported issue without modifying `validation/` or any staged input,

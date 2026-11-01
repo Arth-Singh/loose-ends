@@ -186,27 +186,27 @@ class ProblemDetailTests(unittest.TestCase):
 
 
 class WorkbenchPlanningTests(unittest.TestCase):
-    def test_codex_home_expands_home_and_preserves_request(self):
+    def test_claude_config_dir_expands_home_and_preserves_request(self):
         with TemporaryDirectory() as temporary:
             root = Path(temporary)
             paper = make_paper(root)
-            for value in ("~", "~/.codex custom", "", "   "):
+            for value in ("~", "~/.claude custom", "", "   "):
                 with self.subTest(value=value), patch.dict(os.environ, {"HOME": str(root)}):
                     request = {
                         "action": "analyze",
                         "targets": [{"kind": "paper", "path": str(paper)}],
-                        "options": {"codexHome": value},
+                        "options": {"claudeConfigDir": value},
                     }
                     plan = build_plan(
                         request, project_root=PROJECT_ROOT, allowed_roots=[root],
                         manuscripts=root / "manuscripts", catalog_version=1,
                     )
                     if value.strip():
-                        expected = root if value == "~" else root / ".codex custom"
-                        self.assertEqual(plan["options"]["codexHome"], str(expected.resolve()))
+                        expected = root if value == "~" else root / ".claude custom"
+                        self.assertEqual(plan["options"]["claudeConfigDir"], str(expected.resolve()))
                     else:
-                        self.assertNotIn("codexHome", plan["options"])
-                    self.assertEqual(request["options"]["codexHome"], value)
+                        self.assertNotIn("claudeConfigDir", plan["options"])
+                    self.assertEqual(request["options"]["claudeConfigDir"], value)
 
     def test_write_dialog_job_flow(self):
         result = subprocess.run(
@@ -785,12 +785,13 @@ class WorkbenchPlanningTests(unittest.TestCase):
     def test_task_defaults_come_from_cli_parsers(self):
         defaults = task_cli_defaults()
 
-        self.assertEqual(defaults["metadata"]["reasoningEffort"], "medium")
-        self.assertEqual(
-            defaults["analyze"]["reasoningEffort"],
-            workbench.codex_cli.DEFAULT_REASONING_EFFORT,
-        )
-        self.assertEqual(defaults["metadata"]["model"], workbench.codex_cli.DEFAULT_MODEL)
+        stages = workbench.claude_cli.STAGE_MODEL_DEFAULTS
+        self.assertEqual(set(defaults), {*stages, "revise"})
+        self.assertEqual(defaults["revise"], defaults["write"])  # Both run write_paper.
+        for action, (model, effort) in stages.items():
+            with self.subTest(action=action):
+                self.assertEqual(defaults[action]["model"], model)
+                self.assertEqual(defaults[action]["reasoningEffort"], effort)
         self.assertEqual(defaults["literature"]["webSearch"], "live")
 
     def test_file_import_uploads_and_ingests_directory(self):
@@ -1382,7 +1383,7 @@ class WorkbenchPlanningTests(unittest.TestCase):
                     catalog_version=1,
                 )
 
-    def test_metadata_extraction_plan_uses_managed_codex_script(self):
+    def test_metadata_extraction_plan_uses_managed_agent_script(self):
         with TemporaryDirectory() as temporary:
             root = Path(temporary)
             paper = make_paper(root)
@@ -1626,7 +1627,7 @@ class WorkbenchPlanningTests(unittest.TestCase):
             app.paths = [root]
             app.analysis_lock = threading.Lock()
             app.catalog = Mock()
-            app.catalog.publish_paper.side_effect = common.CodexError("Invalid prior result")
+            app.catalog.publish_paper.side_effect = common.AgentError("Invalid prior result")
             with self.assertLogs(level="ERROR"):
                 result = app.add_open_problem({
                     "path": str(paper), "title": "Question", "statement": "What happens?",
@@ -1781,12 +1782,12 @@ class WorkbenchPlanningTests(unittest.TestCase):
             stderr="",
         )
         plan = fake_plan([sys.executable, "tool.py", "OP-001"])
-        plan["options"] = {"codexHome": str(PROJECT_ROOT / "custom home")}
+        plan["options"] = {"claudeConfigDir": str(PROJECT_ROOT / "custom home")}
 
         returned = populate_dry_run_previews(plan)
 
         self.assertIs(returned, plan)
-        self.assertEqual(run.call_args.kwargs["env"]["CODEX_HOME"], plan["options"]["codexHome"])
+        self.assertEqual(run.call_args.kwargs["env"]["CLAUDE_CONFIG_DIR"], plan["options"]["claudeConfigDir"])
         self.assertEqual(
             run.call_args.args[0],
             [sys.executable, "tool.py", "OP-001", "--dry-run"],
@@ -1812,11 +1813,11 @@ class WorkbenchPlanningTests(unittest.TestCase):
         self.assertIn("Standard error:\ninvalid target", preview["output"])
 
     @patch("workbench_tasks.subprocess.run")
-    def test_plan_preview_reports_home_warnings_before_start(self, run):
+    def test_plan_preview_reports_config_dir_warnings_before_start(self, run):
         run.return_value = Mock(returncode=0, stdout="Would run.\n", stderr="")
         with TemporaryDirectory() as temporary:
             home = Path(temporary)
-            (home / ".codex").mkdir()
+            (home / ".claude").mkdir()
             for action, inherited, selected, expected in (
                 ("solve", "", None, None),
                 ("solve", str(home), None, None),
@@ -1828,10 +1829,10 @@ class WorkbenchPlanningTests(unittest.TestCase):
                     plan = fake_plan([sys.executable, "tool.py"])
                     plan["action"] = action
                     plan["warnings"] = ["Existing warning"]
-                    plan["options"] = {"codexHome": selected} if selected else {}
+                    plan["options"] = {"claudeConfigDir": selected} if selected else {}
                     with (
-                        patch.dict(os.environ, {"CODEX_HOME": inherited, "USERPROFILE": ""}),
-                        patch("codex_cli.Path.home", return_value=home),
+                        patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": inherited}),
+                        patch("claude_cli.Path.home", return_value=home),
                     ):
                         populate_dry_run_previews(plan)
                     self.assertEqual(plan["warnings"][0], "Existing warning")
@@ -1842,21 +1843,21 @@ class WorkbenchPlanningTests(unittest.TestCase):
                         self.assertEqual(warnings, [])
                     self.assertEqual(plan["units"][0]["dryRun"]["status"], "ok")
 
-    def test_metadata_preview_captures_missing_home_warning_from_cli(self):
+    def test_metadata_preview_captures_missing_config_dir_warning_from_cli(self):
         with TemporaryDirectory() as temporary:
             root = Path(temporary)
             paper = make_paper(root)
             plan = build_plan(
                 {"action": "metadata", "targets": [{"kind": "paper", "path": str(paper)}],
-                 "options": {"codexHome": str(root / "missing account")}},
+                 "options": {"claudeConfigDir": str(root / "missing account")}},
                 project_root=PROJECT_ROOT, allowed_roots=[root],
                 manuscripts=root / "manuscripts", catalog_version=1,
             )
             populate_dry_run_previews(plan)
             preview = plan["units"][0]["dryRun"]
             self.assertEqual(preview["status"], "ok")
-            self.assertIn("Would ask Codex", preview["output"])
-            self.assertIn("Warning: Codex home is not an existing directory", preview["output"])
+            self.assertIn("Would ask Claude", preview["output"])
+            self.assertIn("Warning: Claude config directory is not an existing directory", preview["output"])
             self.assertIn(str(root / "missing account"), preview["output"])
             self.assertFalse((root / "missing account").exists())
 
@@ -1888,7 +1889,7 @@ class WorkbenchEditTests(unittest.TestCase):
                 {"kind": "paper", "path": str(paper)} for paper in self.papers
             ],
             "options": options if options is not None else {
-                "codexHome": str(self.root / "old account"), "model": "old-model", "prompt": "Old direction",
+                "claudeConfigDir": str(self.root / "old account"), "model": "old-model", "prompt": "Old direction",
             },
         }
         plan = build_plan(
@@ -1911,8 +1912,8 @@ class WorkbenchEditTests(unittest.TestCase):
         store.mark_starting(first["id"])
         store.update_run(second["id"], status="succeeded")
         before = store.get_job(job["id"])
-        options = {"codexHome": str(self.root / "new account"), "model": "new-model",
-                   "reasoningEffort": "high", "prompt": "New direction", "fast": True}
+        options = {"claudeConfigDir": str(self.root / "new account"), "model": "new-model",
+                   "reasoningEffort": "high", "prompt": "New direction", "maxBudgetUsd": "2.5"}
         plan = self.preview_edit(before, options)
         self.assertEqual(len(plan["units"]), 1)
         self.assertEqual(plan["units"][0]["runId"], third["id"])
@@ -1924,6 +1925,7 @@ class WorkbenchEditTests(unittest.TestCase):
         self.assertEqual(pending["options"], options)
         self.assertIn("new-model", pending["argv"])
         self.assertIn("New direction", pending["argv"])
+        self.assertEqual(pending["argv"][pending["argv"].index("--max-budget-usd") + 1], "2.5")
         self.assertNotIn("old-model", pending["argv"])
         self.assertEqual(pending["targets"], third["targets"])
         self.assertEqual(pending["resources"], third["resources"])
@@ -2041,9 +2043,9 @@ class WorkbenchEditTests(unittest.TestCase):
 
     def test_worker_uses_run_account_instead_of_latest_job_settings(self):
         account = str(self.root / "original account")
-        plan = fake_plan([sys.executable, "-c", "import os; print(os.environ['CODEX_HOME'])"])
-        plan["options"] = {"codexHome": str(self.root / "new account")}
-        plan["units"][0]["options"] = {"codexHome": account}
+        plan = fake_plan([sys.executable, "-c", "import os; print(os.environ['CLAUDE_CONFIG_DIR'])"])
+        plan["options"] = {"claudeConfigDir": str(self.root / "new account")}
+        plan["units"][0]["options"] = {"claudeConfigDir": account}
         job = self.app.store.create_job({"action": "solve"}, plan)
         run = job["runs"][0]
         self.assertEqual(workbench_worker.run_worker(self.app.store.database, run["id"]), 0)
@@ -2194,7 +2196,7 @@ class WorkbenchStoreTests(unittest.TestCase):
             store.update_job_scheduling(job["id"], paused=False)
             self.assertIsNotNone(store.claim_next_run(set()))
 
-    def test_credit_pause_blocks_pending_runs_until_resumed(self):
+    def test_quota_pause_blocks_pending_runs_until_resumed(self):
         with TemporaryDirectory() as temporary:
             state = Path(temporary)
             store = WorkbenchStore(state / "workbench.sqlite3", state)
@@ -2204,8 +2206,11 @@ class WorkbenchStoreTests(unittest.TestCase):
             )
             first, second = job["runs"]
             store.mark_starting(first["id"])
-            store.pause_for_codex_credits("You've hit your usage limit.")
+            store.pause_for_quota("You've hit your usage limit.")
 
+            settings = store.scheduler_settings()
+            self.assertEqual(settings["queuePauseReason"], "quota")
+            self.assertEqual(settings["quotaError"], "You've hit your usage limit.")
             self.assertIsNone(store.claim_next_run(set()))
             self.assertEqual(store.get_run(first["id"])["status"], "starting")
             self.assertEqual(store.get_run(second["id"])["status"], "queued")
@@ -2221,26 +2226,26 @@ class WorkbenchStoreTests(unittest.TestCase):
                 unit["targets"] = [{"kind": "problem", "path": f"/paper/OP-{index}"}]
                 unit["resources"] = [f"problem:/paper/OP-{index}"]
                 unit["probe"] = {"index": index}
-            original = store.create_job({"action": "solve", "options": {"fast": True}}, plan)
+            original = store.create_job({"action": "solve", "options": {"maxBudgetUsd": 2.5}}, plan)
             statuses = ["failed", "partial", "succeeded", "running", "queued", "canceled", "interrupted", "failed"]
-            for run, status in zip(original["runs"], statuses):
+            for run, status in zip(original["runs"], statuses, strict=True):
                 store.update_run(run["id"], status=status)
             store.update_run(original["runs"][1]["id"], outputs_json=["saved-output.json"])
             recovered = store.retry_run(original["runs"][-1]["id"])
             store.update_run(recovered["id"], status="succeeded")
             before = store.get_job(original["id"])
-            store.pause_for_codex_credits("Out of credits")
+            store.pause_for_quota("Out of credits")
 
             retried = store.retry_job(original["id"])
 
             self.assertNotEqual(retried["id"], original["id"])
             self.assertEqual(store.get_job(original["id"]), before)
             self.assertEqual(retried["priority_level"], 2)
-            self.assertEqual(retried["request"]["options"], {"fast": True})
+            self.assertEqual(retried["request"]["options"], {"maxBudgetUsd": 2.5})
             self.assertEqual(retried["plan"]["retryOf"], original["id"])
             self.assertEqual(retried["plan"]["targets"], [unit["targets"][0] for unit in plan["units"][:2]])
             self.assertEqual(len(retried["runs"]), 2)
-            for new, old in zip(retried["runs"], before["runs"]):
+            for new, old in zip(retried["runs"], before["runs"], strict=False):
                 self.assertEqual(new["status"], "queued")
                 self.assertEqual(new["outputs"], [])
                 self.assertEqual(new["retry_of"], old["id"])
@@ -2965,24 +2970,24 @@ class WorkbenchStoreTests(unittest.TestCase):
             self.assertEqual(saved["exit_code"], 2)
             self.assertEqual(saved["error"], "command exited with code 2")
 
-    def test_worker_codex_home_is_isolated_and_preserved_on_retry(self):
+    def test_worker_claude_config_dir_is_isolated_and_preserved_on_retry(self):
         with TemporaryDirectory() as temporary:
             state = Path(temporary)
             store = WorkbenchStore(state / "workbench.sqlite3", state)
-            for custom in (None, str(state / "custom home")):
-                with self.subTest(custom=custom), patch.dict(os.environ, {"CODEX_HOME": "inherited"}):
+            for custom in (None, str(state / "custom config")):
+                with self.subTest(custom=custom), patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": "inherited"}):
                     plan = fake_plan([
                         sys.executable, "-c",
-                        "import os; print('codex home: ' + os.environ['CODEX_HOME'])",
+                        "import os; print('config dir: ' + os.environ['CLAUDE_CONFIG_DIR'])",
                     ])
-                    plan["options"] = {"codexHome": custom} if custom else {}
+                    plan["options"] = {"claudeConfigDir": custom} if custom else {}
                     job = store.create_job({"action": "solve"}, plan)
                     run = job["runs"][0]
                     store.mark_starting(run["id"])
                     self.assertEqual(workbench_worker.run_worker(store.database, run["id"]), 0)
                     log = Path(run["log_path"]).read_text(encoding="utf-8")
-                    self.assertIn("codex home: " + (custom or "inherited"), log)
-                    self.assertEqual(os.environ["CODEX_HOME"], "inherited")
+                    self.assertIn("config dir: " + (custom or "inherited"), log)
+                    self.assertEqual(os.environ["CLAUDE_CONFIG_DIR"], "inherited")
                     store.update_run(run["id"], status="failed")
                     retry = store.retry_job(job["id"])
                     self.assertEqual(retry["plan"]["options"], plan["options"])
@@ -3502,8 +3507,7 @@ class WorkbenchWatchTests(unittest.TestCase):
         scheduler.store.update_run.assert_not_called()
         self.assertNotIn(workbench_memory.QUEUE_JOB_ENV, popen.call_args.kwargs["env"])
 
-    @unittest.skipUnless(sys.platform == "win32", "Windows process flags")
-    def test_scheduler_launches_worker_without_a_console_window(self):
+    def test_scheduler_launches_worker_in_its_own_session(self):
         scheduler = object.__new__(workbench.Scheduler)
         scheduler.store = Mock()
         scheduler.hub = Mock()
@@ -3513,13 +3517,12 @@ class WorkbenchWatchTests(unittest.TestCase):
         with patch.object(workbench.subprocess, "Popen") as popen:
             scheduler._launch({"id": "test-run"})
 
+        # Its own session lets a stop reach every child of the worker.
         options = popen.call_args.kwargs
-        self.assertTrue(
-            options["creationflags"] & subprocess.CREATE_NO_WINDOW
-        )
-        self.assertTrue(
-            options["startupinfo"].dwFlags
-            & subprocess.STARTF_USESHOWWINDOW
+        self.assertIs(options["start_new_session"], True)
+        self.assertEqual(
+            options["env"]["LOOSE_ENDS_AGENT_LAUNCH_GATE"],
+            str(PROJECT_ROOT / ".loose-ends" / "claude-launch.lock"),
         )
 
     def test_initial_catalog_scan_does_not_block_server_startup(self):

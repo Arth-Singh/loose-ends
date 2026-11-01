@@ -10,16 +10,15 @@ from dataclasses import dataclass
 from functools import lru_cache
 import json
 import os
-from pathlib import Path, PureWindowsPath
+from pathlib import Path
 import pydoc
 import re
-import subprocess
 import sys
 import textwrap
 from typing import Callable, Iterable, Sequence
 import webbrowser
 
-import codex_cli
+import claude_cli
 import open_problem_common as common
 import review_solutions
 
@@ -96,7 +95,7 @@ def discover_human_reviews(
             continue
         level = result.get("human_priority", result.get("attention"))
         if level not in review_solutions.HUMAN_PRIORITY_LEVELS:
-            raise common.CodexError(
+            raise common.AgentError(
                 f"review has invalid human priority: {result_path}"
             )
         if level not in priority:
@@ -126,7 +125,7 @@ def discover_human_reviews(
                 progress(index, len(candidates))
 
     items: list[HumanReviewItem] = []
-    for (attempt, result), current in zip(candidates, current_values):
+    for (attempt, result), current in zip(candidates, current_values, strict=True):
         if not current and not include_stale:
             pass
         else:
@@ -163,7 +162,7 @@ def discover_human_reviews(
             sorted(priority, key=PRIORITY_RANK.__getitem__)
         )
         qualifier = "current " if not include_stale else ""
-        raise common.CodexError(
+        raise common.AgentError(
             f"no matching {qualifier}reviews have priority {levels}"
         )
     return items
@@ -304,44 +303,14 @@ def _append_file_contents(
     lines.extend((contents or "_File is empty._", ""))
 
 
-@lru_cache(maxsize=1)
-def _native_project_root() -> str:
-    """Convert the project root once instead of spawning cygpath per link."""
-    return codex_cli.path_for_codex(PROJECT_ROOT)
-
-
 @lru_cache(maxsize=65536)
 def _browser_file_uri(path: Path) -> str:
     resolved = path if path.is_absolute() else path.resolve()
-    try:
-        relative = resolved.relative_to(PROJECT_ROOT)
-    except ValueError:
-        native = codex_cli.path_for_codex(resolved)
-    else:
-        native_root = _native_project_root()
-        if len(native_root) >= 3 and native_root[1:3] in {":\\", ":/"}:
-            native = str(PureWindowsPath(native_root).joinpath(*relative.parts))
-        else:
-            return resolved.as_uri()
-    if len(native) >= 3 and native[1:3] in {":\\", ":/"}:
-        return PureWindowsPath(native).as_uri()
     return resolved.as_uri()
 
 
 def open_in_browser(target: Path | str) -> bool:
     """Open a local file or URL in the graphical system browser."""
-    if sys.platform == "cygwin":
-        argument = (
-            codex_cli.path_for_codex(target)
-            if isinstance(target, Path)
-            else target
-        )
-        subprocess.Popen(
-            ["cygstart", argument],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        return True
     url = _browser_file_uri(target) if isinstance(target, Path) else target
     return webbrowser.open(url)
 
@@ -723,7 +692,7 @@ def build_review_catalog(
                 (problem for _, problem in problem_values),
             )
             for index, ((key, _), context) in enumerate(
-                zip(problem_values, contexts),
+                zip(problem_values, contexts, strict=True),
                 1,
             ):
                 problem_contexts[key] = context
@@ -2434,7 +2403,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    codex_cli.configure_utf8_stdio()
+    claude_cli.configure_utf8_stdio()
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
@@ -2466,7 +2435,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         if args.terminal:
             if args.output is not None:
-                raise common.CodexError(
+                raise common.AgentError(
                     "--output cannot be combined with --terminal"
                 )
             report = render_human_review_report(
@@ -2507,8 +2476,8 @@ def main(argv: list[str] | None = None) -> int:
                         f"Could not open the browser automatically: {exc}",
                         file=sys.stderr,
                     )
-    except (common.CodexError, OSError, UnicodeError) as exc:
-        return codex_cli.report_error(parser, exc)
+    except (common.AgentError, OSError, UnicodeError) as exc:
+        return claude_cli.report_error(parser, exc)
     return 0
 
 

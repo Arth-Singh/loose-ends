@@ -46,11 +46,11 @@ const state = {
   jobDetails: new Map(),
   runLogs: new Map(),
   runLogLoads: new Map(),
-  codexLogs: new Map(),
-  codexLoads: new Set(),
-  codexTimers: new Map(),
+  transcriptLogs: new Map(),
+  transcriptLoads: new Set(),
+  transcriptTimers: new Map(),
   expandedRuns: new Set(),
-  expandedCodexRuns: new Set(),
+  expandedTranscriptRuns: new Set(),
   expandedTranscriptPanels: new Set(),
   expandedJobScopes: new Set(),
   expandedProblemBackgrounds: new Set(),
@@ -958,14 +958,14 @@ function usageTable(value, label) {
   const head = node("thead");
   const header = node("tr");
   for (const [label, title] of [
-    ["Stage", "Pipeline stage"], ["Turns", "Recorded Codex turns"],
+    ["Stage", "Pipeline stage"], ["Turns", "Recorded Claude invocations"],
     ["Elapsed", "Sum of wall-clock durations; overlapping runs count separately"],
     ["Input", "All input tokens, including cache reads and writes"],
     ["Cache read", "Cached tokens within input"],
-    ["Cache write", "Cache-write tokens reported by Codex; zero may be a default when upstream usage is unavailable"],
+    ["Cache write", "Cache-write tokens within input"],
     ["Output", "All output tokens, including reasoning"],
-    ["Reasoning", "Reasoning tokens within output"],
-    ["Est. API cost", "Estimated API-equivalent token cost"],
+    ["Reasoning", "Thinking tokens within output"],
+    ["Est. API cost", "API-equivalent cost reported by Claude Code"],
   ]) {
     const cell = node("th", "", label);
     cell.scope = "col";
@@ -1016,19 +1016,19 @@ function usageTable(value, label) {
   return scroll;
 }
 
-function usagePricingTable(pricing, modelFilter = null) {
+function usageModelTable(breakdown, modelFilter = null) {
   const table = node("table", "usage-stage-table");
-  table.append(node("caption", "", "Assumed rates · USD per 1M tokens"));
+  table.append(node("caption", "", "Models · cost reported by Claude Code"));
   const head = node("thead");
   const header = node("tr");
-  for (const label of ["Model", "Service tier", "Uncached input", "Cache read", "Cache write (30m)", "Output"]) {
+  for (const label of ["Model", "Invocations", "Est. API cost"]) {
     const cell = node("th", "", label);
     cell.scope = "col";
     header.append(cell);
   }
   head.append(header);
   const body = node("tbody");
-  for (const item of pricing) {
+  for (const item of breakdown) {
     const row = node("tr");
     const model = node("th", "", item.model || "Unknown model");
     model.scope = "row";
@@ -1037,23 +1037,18 @@ function usagePricingTable(pricing, modelFilter = null) {
       const input = node("input");
       input.type = "checkbox";
       input.checked = !modelFilter.excludedModels.has(item.model);
-      input.dataset.usageModel = JSON.stringify([item.model, item.tier]);
-      input.setAttribute("aria-label", `Include ${item.model || "Unknown model"} (${item.tier || "unknown tier"})`);
-      input.title = "Include this model across all service tiers";
+      input.dataset.usageModel = JSON.stringify(item.model);
+      input.setAttribute("aria-label", `Include ${item.model || "Unknown model"}`);
       input.addEventListener("change", () => setUsageModelIncluded(modelFilter, item.model, input.checked));
       label.append(input, node("span", "", item.model || "Unknown model"));
       model.replaceChildren(label);
       row.classList.toggle("usage-model-excluded", !input.checked);
     }
-    row.append(model, node("td", "", item.tier || "Unknown tier"));
-    for (const key of ["input", "cachedInput", "cacheWrite", "output"]) {
-      const rate = item.rates?.[key];
-      const cell = node("td", "", rate == null ? "—" : rate.toLocaleString("en-US", {
-        style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 6,
-      }));
-      if (rate == null) cell.title = "No assumed pricing; excluded from the cost estimate";
-      row.append(cell);
-    }
+    const cost = node("td", "", item.estimatedCost == null ? "—" : item.estimatedCost.toLocaleString("en-US", {
+      style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 4,
+    }));
+    if (item.estimatedCost == null) cost.title = "No reported cost for these invocations";
+    row.append(model, node("td", "", item.invocations.toLocaleString("en-US")), cost);
     body.append(row);
   }
   table.append(head, body);
@@ -1086,7 +1081,7 @@ function usageRunFilter(modelFilter) {
 function refreshUsageFilters(modelFilter) {
   document.querySelectorAll("[data-usage-targets]").forEach(element => {
     if (element.usageModelFilter === modelFilter) {
-      element.usageValue = null; // Also synchronize duplicate model rows across tiers.
+      element.usageValue = null; // Also synchronize other views of the same targets.
       refreshUsageElement(element);
     }
   });
@@ -1107,7 +1102,7 @@ async function refreshUsageElement(element, force = false) {
         : value.invocations ? "Cost: unavailable" : value.indexing ? "Cost: indexing…" : "Cost: no usage";
       element.title = `${element.dataset.usageLabel}. Estimated API cost; click for tokens and stage breakdown.`
         + (value.missingUsage ? ` ${value.missingUsage} turn(s) missing usage.` : "")
-        + (value.unpriced ? ` ${value.unpriced} turn(s) without known pricing.` : "")
+        + (value.unpriced ? ` ${value.unpriced} turn(s) without a reported cost.` : "")
         + (value.indexing ? " Usage index is updating." : "")
         + (value.indexError ? ` Index update failed: ${value.indexError}` : "");
       return;
@@ -1123,28 +1118,22 @@ async function refreshUsageElement(element, force = false) {
     if (value.indexing) coverage.push("Indexing saved logs; totals may grow.");
     if (value.indexError) coverage.push(`Index update failed: ${value.indexError}`);
     if (value.missingUsage) coverage.push(`${value.missingUsage} invocation(s) missing usage.`);
-    if (value.unpriced) coverage.push(`${value.unpriced} invocation(s) without known pricing.`);
+    if (value.unpriced) coverage.push(`${value.unpriced} invocation(s) without a reported cost.`);
     if (value.missingElapsed) coverage.push(`${value.missingElapsed} invocation(s) without attributable elapsed time.`);
     if (value.missingElapsedRuns) coverage.push(`${value.missingElapsedRuns} run(s) missing elapsed time.`);
     if (coverage.length) element.append(node("p", "usage-coverage muted", coverage.join(" ")));
     const details = node("details", "usage-breakdown");
     details.open = expanded;
-    details.append(node("summary", "", "Pricing details"));
+    details.append(node("summary", "", "Cost details"));
     if (element.usageModelFilter) details.append(usageRunFilter(element.usageModelFilter));
     details.append(node("p", "muted", "Cache columns are included in input; reasoning is included in output. — means unreported; * means partially reported. Manuscript work is counted separately from source papers and problems."));
     details.append(node("p", "muted", "Elapsed sums wall-clock durations, counting parallel runs separately. ≈ includes time from run start/end timestamps; + includes running work. The Unknown row covers time without an attributable stage, including setup and work outside timed invocations. Unknown model also covers unassigned run time, which cannot be split by model."));
-    details.append(node("p", "muted", "Cache-write counts are copied from Codex logs. The CLI usage schema allows a default of zero; these logs cannot distinguish a measured zero from a missing upstream count."));
-    if (element.usageModelFilter && value.pricingRates?.length) {
-      details.append(node("p", "muted", "Select models to include in the totals (all service tiers)."));
+    if (element.usageModelFilter && value.modelBreakdown?.length) {
+      details.append(node("p", "muted", "Select models to include in the totals."));
     }
-    if (value.pricingRates?.length) details.append(usagePricingTable(value.pricingRates, element.usageModelFilter));
+    if (value.modelBreakdown?.length) details.append(usageModelTable(value.modelBreakdown, element.usageModelFilter));
     else if (value.models.length) details.append(node("p", "muted", value.models.join(", ")));
     details.append(node("p", "muted", value.assumptions));
-    const pricing = node("a", "", `Pricing: ${value.pricingVersion}`);
-    pricing.href = value.pricingUrl;
-    pricing.target = "_blank";
-    pricing.rel = "noopener noreferrer";
-    details.append(pricing);
     if (value.updatedAt) details.append(node("p", "muted", `Index updated ${formatTime(value.updatedAt)}`));
     element.append(details);
     if (focusedModel !== undefined) {
@@ -1359,8 +1348,8 @@ function renderSchedulerControl() {
     : state.settings.memoryLimitPending
       ? "Pause manually"
       : "Pause queue";
-  if (state.settings.queuePauseReason === "codex_credits") {
-    workerStatus.textContent = `${counts.active} active; ${counts.queued} waiting. Codex credits exhausted. Replenish credits, then resume the queue. Active runs continue.`;
+  if (state.settings.queuePauseReason === "quota") {
+    workerStatus.textContent = `${counts.active} active; ${counts.queued} waiting. Claude usage limit reached${state.settings.quotaError ? ` (${state.settings.quotaError})` : ""}. Resume the queue after the limit resets. Active runs continue.`;
   } else if (state.settings.memoryLimitPending && state.settings.memory?.error) {
     workerStatus.textContent = `${counts.active} active; ${counts.queued} waiting. Queue paused because memory enforcement failed.`;
   } else if (state.settings.memoryLimitPending) {
@@ -2474,7 +2463,7 @@ function renderReviewDetail(item) {
   }));
 
   const tabs = reviewModel.detailTabs(item);
-  tabs.splice(tabs.length - 1, 0, ["codex", "Codex logs"]);
+  tabs.splice(tabs.length - 1, 0, ["transcript", "Claude logs"]);
   if (!tabs.some(([key]) => key === state.detailTab)) state.detailTab = tabs[0][0];
   const reports = node("section", "section problem-reports");
   reports.id = "problem-documents";
@@ -2496,9 +2485,9 @@ function renderReviewDetail(item) {
   else if (state.detailTab === "critique") section.append(markdown(item.critique, "No review is installed."));
   else if (state.detailTab === "triage") section.append(markdown(item.triageReport, "Loading triage report…"));
   else if (state.detailTab === "literature") section.append(markdown(item.literatureReport, "No literature report is installed."));
-  else if (state.detailTab === "codex") {
+  else if (state.detailTab === "transcript") {
     section.append(node("p", "muted", "Logs for this attempt, plus the problem’s saved triage and literature review."));
-    section.append(codexTranscript(`/api/review-codex?${new URLSearchParams({
+    section.append(agentTranscript(`/api/review-transcript?${new URLSearchParams({
       key: item.itemKey, version: state.catalog.version || 0,
     })}`));
   }
@@ -2509,7 +2498,7 @@ function renderReviewDetail(item) {
   reports.append(section);
   shell.append(reports);
   main.replaceChildren(shell);
-  refreshVisibleCodexLogs();
+  refreshVisibleTranscripts();
 }
 
 function appendStringList(parent, title, values) {
@@ -2678,7 +2667,7 @@ function renderPapers() {
   shell.append(fileGrid(paper.files));
   shell.append(catalogTranscriptFold("paper", paper));
   main.replaceChildren(shell);
-  refreshVisibleCodexLogs();
+  refreshVisibleTranscripts();
 }
 
 function paperProblemReviews(paperPath) {
@@ -3407,7 +3396,7 @@ function renderManuscripts() {
   shell.append(heading, fileGrid(draft.files));
   shell.append(catalogTranscriptFold("draft", draft));
   main.replaceChildren(shell);
-  refreshVisibleCodexLogs();
+  refreshVisibleTranscripts();
 }
 
 function renderActivity({ preserveDetail = false } = {}) {
@@ -3601,8 +3590,8 @@ function shellQuote(value) {
 
 function runCommandDisplay(job, run) {
   const command = run.argv.map(shellQuote).join(" ");
-  const home = (run.options ?? job.plan?.options)?.codexHome;
-  return home ? `CODEX_HOME=${shellQuote(home)} ${command}` : command;
+  const configDir = (run.options ?? job.plan?.options)?.claudeConfigDir;
+  return configDir ? `CLAUDE_CONFIG_DIR=${shellQuote(configDir)} ${command}` : command;
 }
 
 function renderJobDetail(job) {
@@ -3731,21 +3720,21 @@ function renderJobDetail(job) {
       });
       section.append(output);
     }
-    const codexExpanded = state.expandedCodexRuns.has(run.id);
-    const codexFooter = node("div", "run-detail-footer");
-    const codexToggle = button(`${codexExpanded ? "Hide" : "Show"} Codex transcript`, () => {
-      if (state.expandedCodexRuns.has(run.id)) state.expandedCodexRuns.delete(run.id);
-      else state.expandedCodexRuns.add(run.id);
+    const transcriptExpanded = state.expandedTranscriptRuns.has(run.id);
+    const transcriptFooter = node("div", "run-detail-footer");
+    const transcriptToggle = button(`${transcriptExpanded ? "Hide" : "Show"} Claude transcript`, () => {
+      if (state.expandedTranscriptRuns.has(run.id)) state.expandedTranscriptRuns.delete(run.id);
+      else state.expandedTranscriptRuns.add(run.id);
       renderJobDetail(job);
     }, "run-detail-toggle");
-    codexToggle.setAttribute("aria-expanded", String(codexExpanded));
-    codexToggle.setAttribute("aria-label", `${codexExpanded ? "Hide" : "Show"} Codex transcript for ${presentation.title}`);
-    codexToggle.prepend(node("span", "run-chevron", "›"));
-    codexFooter.append(codexToggle);
-    section.append(codexFooter);
-    if (codexExpanded) {
+    transcriptToggle.setAttribute("aria-expanded", String(transcriptExpanded));
+    transcriptToggle.setAttribute("aria-label", `${transcriptExpanded ? "Hide" : "Show"} Claude transcript for ${presentation.title}`);
+    transcriptToggle.prepend(node("span", "run-chevron", "›"));
+    transcriptFooter.append(transcriptToggle);
+    section.append(transcriptFooter);
+    if (transcriptExpanded) {
       const details = node("div", "run-expanded");
-      details.append(codexTranscript(`/api/runs/${run.id}/codex`));
+      details.append(agentTranscript(`/api/runs/${run.id}/transcript`));
       section.append(details);
     }
     const detailFooter = node("div", "run-detail-footer");
@@ -3840,7 +3829,7 @@ async function refreshRunLog(runId) {
 }
 
 function refreshVisibleRunLogs() {
-  refreshVisibleCodexLogs();
+  refreshVisibleTranscripts();
   main.querySelectorAll("[data-run-log]").forEach(log => {
     refreshRunLog(log.dataset.runLog);
   });
@@ -3848,111 +3837,156 @@ function refreshVisibleRunLogs() {
 
 function catalogTranscriptFold(kind, item) {
   const key = `${kind}:${item.key}`;
-  const source = `/api/catalog-codex?${new URLSearchParams({
+  const source = `/api/catalog-transcript?${new URLSearchParams({
     category: kind, key: item.key, version: state.catalog.version || 0,
   })}`;
   const fold = node("details", "catalog-transcript-fold");
-  fold.append(node("summary", "", "Codex logs"));
+  fold.append(node("summary", "", "Claude logs"));
   fold.open = state.expandedTranscriptPanels.has(key);
-  if (fold.open) fold.append(codexTranscript(source));
+  if (fold.open) fold.append(agentTranscript(source));
   fold.addEventListener("toggle", () => {
     if (fold.open) {
       state.expandedTranscriptPanels.add(key);
-      if (!fold.querySelector("[data-codex-source]")) fold.append(codexTranscript(source));
-      refreshVisibleCodexLogs();
+      if (!fold.querySelector("[data-transcript-source]")) fold.append(agentTranscript(source));
+      refreshVisibleTranscripts();
     } else {
       state.expandedTranscriptPanels.delete(key);
-      fold.querySelector("[data-codex-source]")?.remove();
+      fold.querySelector("[data-transcript-source]")?.remove();
     }
   });
   return fold;
 }
 
-function codexTranscript(source) {
-  const element = node("section", "codex-transcripts");
-  element.dataset.codexSource = source;
-  element.append(node("h3", "", "Codex transcript"));
+function agentTranscript(source) {
+  const element = node("section", "agent-transcripts");
+  element.dataset.transcriptSource = source;
+  element.append(node("h3", "", "Claude transcript"));
   return element;
 }
 
-function refreshVisibleCodexLogs() {
-  main.querySelectorAll("[data-codex-source]").forEach(element => {
-    refreshCodexLogs(element.dataset.codexSource, element);
+function refreshVisibleTranscripts() {
+  main.querySelectorAll("[data-transcript-source]").forEach(element => {
+    refreshTranscript(element.dataset.transcriptSource, element);
   });
 }
 
-function codexItems(text) {
-  const items = new Map();
-  let turn = 0;
-  let sequence = 0;
+function toolSummary(input) {
+  if (!input || typeof input !== "object") return "";
+  const value = input.command ?? input.file_path ?? input.path ?? input.pattern ?? input.query ?? input.url ?? input.description;
+  return typeof value === "string" ? value : "";
+}
+
+function toolOutput(content) {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content.map(part => typeof part?.text === "string" ? part.text : JSON.stringify(part, null, 2)).join("\n");
+  }
+  return content == null ? "" : JSON.stringify(content, null, 2);
+}
+
+function resultText(event) {
+  const parts = [];
+  if (typeof event.total_cost_usd === "number") parts.push(`cost $${event.total_cost_usd.toFixed(4)}`);
+  if (typeof event.num_turns === "number") parts.push(`${event.num_turns} model turn(s)`);
+  if (typeof event.duration_ms === "number") parts.push(`${(event.duration_ms / 1000).toFixed(1)} s`);
+  const errors = Array.isArray(event.errors) ? event.errors.filter(value => typeof value === "string") : [];
+  return [parts.join(" · "), ...errors].filter(Boolean).join("\n") || JSON.stringify(event.usage || {}, null, 2);
+}
+
+// Claude Code stream-json: assistant events carry text, thinking, and
+// tool_use blocks; user events return tool_result blocks matched by id.
+function transcriptItems(text) {
+  const items = [];
+  const tools = new Map();
   for (const line of text.split("\n")) {
     let event;
     try { event = JSON.parse(line); } catch { continue; }
     if (!event || typeof event !== "object") continue;
-    if (event.type === "thread.started" || event.type === "turn.started") turn++;
-    if (event.item && typeof event.item === "object") {
-      items.set(`${turn}:${event.item.id ?? sequence++}`, event.item);
-    } else if (event.type === "error" || event.type === "turn.failed") {
-      items.set(`error:${sequence++}`, { type: "error", text: event.message || event.error?.message || JSON.stringify(event) });
-    } else if (event.type === "turn.completed") {
-      items.set(`usage:${sequence++}`, { type: "usage", text: JSON.stringify(event.usage || {}) });
+    if (event.type === "system" && event.subtype === "init") {
+      items.push({ type: "session", detail: event.model || "", output: `Tools: ${(event.tools || []).join(", ") || "none"}` });
+    } else if (event.type === "assistant") {
+      for (const block of event.message?.content || []) {
+        if (block.type === "text" && block.text) items.push({ type: "agent_message", text: block.text });
+        else if (block.type === "thinking" && block.thinking) items.push({ type: "thinking", output: block.thinking });
+        else if (block.type === "tool_use") {
+          const item = { type: block.name || "tool", detail: toolSummary(block.input), input: JSON.stringify(block.input ?? {}, null, 2), status: "requested" };
+          tools.set(block.id, item);
+          items.push(item);
+        }
+      }
+    } else if (event.type === "user") {
+      const content = event.message?.content;
+      for (const block of Array.isArray(content) ? content : []) {
+        if (block.type !== "tool_result") continue;
+        const item = tools.get(block.tool_use_id);
+        const output = toolOutput(block.content);
+        if (item) {
+          item.output = output;
+          item.status = block.is_error ? "failed" : "completed";
+        } else {
+          items.push({ type: "tool_result", output, status: block.is_error ? "failed" : "completed" });
+        }
+      }
+    } else if (event.type === "rate_limit_event" && event.rate_limit_info?.status === "rejected") {
+      items.push({ type: "error", output: `Usage limit reached (${event.rate_limit_info.rateLimitType || "unknown"} window)` });
+    } else if (event.type === "result") {
+      items.push({ type: event.is_error ? "error" : "result", status: event.subtype, output: resultText(event) });
     }
   }
-  return [...items.values()];
+  return items;
 }
 
-function renderCodexTranscript(element, transcripts) {
-  element.replaceChildren(node("h3", "", "Codex transcript"));
+function renderTranscript(element, transcripts) {
+  element.replaceChildren(node("h3", "", "Claude transcript"));
   if (!transcripts.length) {
-    element.append(node("p", "muted", "No saved Codex transcript available yet."));
+    element.append(node("p", "muted", "No saved Claude transcript available yet."));
   }
   for (const transcript of transcripts) {
-    element.append(node("h4", "codex-invocation-heading", transcript.label));
+    element.append(node("h4", "transcript-invocation-heading", transcript.label));
     if (transcript.legacy) {
       const notice = node("p", "muted");
       notice.append(node("em", "", "Original prompt unavailable for this historical log."));
       element.append(notice);
     }
     if (transcript.prompt) {
-      const prompt = node("details", "codex-activity");
+      const prompt = node("details", "transcript-activity");
       prompt.append(node("summary", "", "Task prompt"), node("pre", "", transcript.prompt));
       element.append(prompt);
     }
-    for (const item of codexItems(transcript.events || "")) {
+    for (const item of transcriptItems(transcript.events || "")) {
       if (item.type === "agent_message") {
-        const message = node("article", "codex-message");
+        const message = node("article", "transcript-message");
         message.append(markdown(item.text || ""));
         element.append(message);
-      } else {
-        const activity = node("details", "codex-activity");
-        const detail = item.command || item.query;
-        const label = `${item.type || "unknown"}${detail ? ` · ${detail}` : ""}`;
-        const summary = node("summary");
-        summary.append(node("span", "codex-activity-label", `${label}${item.status ? ` · ${humanize(item.status)}` : ""}`));
-        activity.append(summary);
-        if (detail) activity.append(node("pre", "", detail));
-        activity.append(node("pre", "", item.aggregated_output || item.text || JSON.stringify(item, null, 2)));
-        element.append(activity);
+        continue;
       }
+      const activity = node("details", "transcript-activity");
+      const label = `${item.type}${item.detail ? ` · ${item.detail}` : ""}${item.status ? ` · ${humanize(item.status)}` : ""}`;
+      const summary = node("summary");
+      summary.append(node("span", "transcript-activity-label", label));
+      activity.append(summary);
+      if (item.input) activity.append(node("pre", "", item.input));
+      if (item.output) activity.append(node("pre", "", item.output));
+      element.append(activity);
     }
     if (transcript.diagnostics) {
-      const diagnostics = node("details", "codex-activity");
+      const diagnostics = node("details", "transcript-activity");
       diagnostics.append(node("summary", "", "Diagnostics"), node("pre", "", transcript.diagnostics));
       element.append(diagnostics);
     }
   }
 }
 
-async function refreshCodexLogs(source, element) {
-  const cached = state.codexLogs.get(source) || [];
+async function refreshTranscript(source, element) {
+  const cached = state.transcriptLogs.get(source) || [];
   if (!element.dataset.rendered) {
-    renderCodexTranscript(element, cached);
+    renderTranscript(element, cached);
     element.dataset.rendered = "true";
   }
-  if (state.codexLoads.has(source)) return;
-  clearTimeout(state.codexTimers.get(source));
-  state.codexTimers.delete(source);
-  state.codexLoads.add(source);
+  if (state.transcriptLoads.has(source)) return;
+  clearTimeout(state.transcriptTimers.get(source));
+  state.transcriptTimers.delete(source);
+  state.transcriptLoads.add(source);
   let pending = true;
   try {
     const value = await api(source);
@@ -3971,25 +4005,25 @@ async function refreshCodexLogs(source, element) {
         if (result.text) changed = true;
       }
     }
-    state.codexLogs.set(source, cached);
+    state.transcriptLogs.set(source, cached);
     pending = !value.complete || cached.some(transcript =>
       Object.values(transcript.files).some(file => !file.complete));
-    main.querySelectorAll("[data-codex-source]").forEach(current => {
-      if (current.dataset.codexSource !== source || (!changed && current === element)) return;
+    main.querySelectorAll("[data-transcript-source]").forEach(current => {
+      if (current.dataset.transcriptSource !== source || (!changed && current === element)) return;
       const expanded = [...current.querySelectorAll("details")].map(value => value.open);
       const scrollTop = current.scrollTop;
-      renderCodexTranscript(current, cached);
+      renderTranscript(current, cached);
       current.querySelectorAll("details").forEach((value, index) => { value.open = expanded[index] || false; });
       current.scrollTop = scrollTop;
     });
   } catch (error) {
     if (element.isConnected && !cached.length) element.replaceChildren(node("p", "error-box", error.message));
   } finally {
-    state.codexLoads.delete(source);
-    if (pending) state.codexTimers.set(source, setTimeout(() => {
-      state.codexTimers.delete(source);
-      main.querySelectorAll("[data-codex-source]").forEach(current => {
-        if (current.dataset.codexSource === source) refreshCodexLogs(source, current);
+    state.transcriptLoads.delete(source);
+    if (pending) state.transcriptTimers.set(source, setTimeout(() => {
+      state.transcriptTimers.delete(source);
+      main.querySelectorAll("[data-transcript-source]").forEach(current => {
+        if (current.dataset.transcriptSource === source) refreshTranscript(source, current);
       });
     }, 2000));
   }
@@ -4606,14 +4640,15 @@ function field(name, label, { type = "text", value = "", placeholder = "", help 
   return wrapper;
 }
 
+const EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"];
+
 function modelField(name, label, value, defaultLabel) {
   const options = [
     ["", defaultLabel],
-    ["gpt-6.1-sol", "GPT-6.1 Sol"],
-    ["gpt-6-astra", "GPT-6 Astra"],
-    ["gpt-5.6-sol", "GPT-5.6 Sol"],
-    ["gpt-5.6-terra", "GPT-5.6 Terra"],
-    ["gpt-5.6-luna", "GPT-5.6 Luna"],
+    ["claude-opus-5-5", "Claude Opus 5.5"],
+    ["claude-fable-5-1", "Claude Fable 5.1"],
+    ["claude-sonnet-5-5", "Claude Sonnet 5.5"],
+    ["claude-haiku-5-5", "Claude Haiku 5.5"],
   ];
   // Preserve model IDs from saved task drafts, including older models.
   if (value && !options.some(([id]) => id === value)) options.push([value, value]);
@@ -4997,32 +5032,32 @@ function renderTaskConfiguration(errorMessage = "") {
   ));
   advancedGrid.append(field("reasoningEffort", "Reasoning effort", {
     type: "select", value: options.reasoningEffort || "",
-    options: [["", `Default (${taskDefaults.reasoningEffort || "unavailable"})`], ...["low", "medium", "high", "xhigh", "max", "ultra"].map(value => [value, value])],
+    options: [["", `Default (${taskDefaults.reasoningEffort || "unavailable"})`], ...EFFORT_LEVELS.map(value => [value, value])],
   }));
-  advancedGrid.append(field("serviceTier", "Speed / service tier", {
-    type: "select", value: options.serviceTier || (options.fast ? "fast" : "standard"),
-    options: [["standard", "Standard"], ["fast", "Fast (higher cost)"], ["ultrafast", "Ultrafast (highest cost; requires model/account support)"]],
+  advancedGrid.append(field("maxBudgetUsd", "Budget per invocation (USD)", {
+    type: "number", value: options.maxBudgetUsd ?? "", placeholder: "No limit",
+    help: "Stops one Claude invocation once its API-equivalent cost reaches this amount. Applies to critics too unless they finish first.",
   }));
   if (["literature", "solve", "review", "write", "revise"].includes(task.action)) {
     advancedGrid.append(field("webSearch", "Web search", {
       type: "select", value: options.webSearch || "",
-      options: [["", `Default (${reviewModel.titleize(taskDefaults.webSearch || "unavailable")})`], ["live", "Live"], ["indexed", "Indexed"], ["disabled", "Disabled"]],
+      options: [["", `Default (${reviewModel.titleize(taskDefaults.webSearch || "unavailable")})`], ["live", "Live"], ["disabled", "Disabled"]],
     }));
   }
   if (["solve", "write", "revise"].includes(task.action)) {
     advancedGrid.append(modelField("reviewModel", "Critic model", options.reviewModel, "Inherit primary model"));
     advancedGrid.append(field("reviewReasoningEffort", "Critic reasoning", {
       type: "select", value: options.reviewReasoningEffort || "",
-      options: [["", "Inherit"], ...["low", "medium", "high", "xhigh", "max", "ultra"].map(value => [value, value])],
+      options: [["", "Inherit"], ...EFFORT_LEVELS.map(value => [value, value])],
     }));
     advancedGrid.append(field("reviewWebSearch", "Critic web search", {
       type: "select", value: options.reviewWebSearch || "",
-      options: [["", "Inherit"], ["live", "Live"], ["indexed", "Indexed"], ["disabled", "Disabled"]],
+      options: [["", "Inherit"], ["live", "Live"], ["disabled", "Disabled"]],
     }));
   }
-  advancedGrid.append(field("codexHome", "CODEX_HOME", {
-    value: options.codexHome || "", placeholder: "~/.codex", full: true,
-    help: "Leave blank to inherit the server's CODEX_HOME or default. Dry runs warn if the selected or default home directory is missing. ~ expands to the server's HOME directory.",
+  advancedGrid.append(field("claudeConfigDir", "CLAUDE_CONFIG_DIR (account)", {
+    value: options.claudeConfigDir || "", placeholder: "~/.claude", full: true,
+    help: "Leave blank to use the server's logged-in Claude account. Set a different config directory to run under another account. Dry runs warn if the directory is missing. ~ expands to the server's HOME directory.",
   }));
   modelSettings.append(advancedGrid);
   grid.append(modelSettings);
@@ -5139,11 +5174,11 @@ function renderTaskConfirmation() {
     : `This will queue ${scope} with a ${priorityMultiplier(plan.priorityLevel)} scheduling weight. Nothing has started yet.`);
   dialogBody.append(intro);
   if (plan.warnings.length) plan.warnings.forEach(value => dialogBody.append(node("div", "warning", value)));
-  if (plan.options?.codexHome) {
+  if (plan.options?.claudeConfigDir) {
     const block = node("section", "confirm-block");
     block.append(node("h3", "", "Environment"));
     block.append(node("p", "", task.editJob ? "Applies to the queued runs shown below." : "Applies to all dry-run previews and runs in this task."));
-    block.append(node("pre", "command", `CODEX_HOME=${plan.options.codexHome}`));
+    block.append(node("pre", "command", `CLAUDE_CONFIG_DIR=${plan.options.claudeConfigDir}`));
     dialogBody.append(block);
   }
   if (Object.keys(plan.prompts).length) {
